@@ -17,7 +17,7 @@
 #
 #   jobs:
 #     bump:
-#       uses: <owner>/odoo-platform/.github/workflows/bump-submodules.yml@18.0
+#       uses: <owner>/odoo-platform/.github/workflows/bump-submodules.yml@19.0
 #       secrets:
 #         BUMP_TOKEN: ${{ secrets.SUBMODULE_BUMP_PAT }}
 #

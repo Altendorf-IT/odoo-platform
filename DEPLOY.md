@@ -1,14 +1,14 @@
 # Deploying & developing gemini_addons18
 
-This repo is the **authoritative source** of the Odoo 18 solution. It ships a
-complete Docker stack (Odoo + PostgreSQL). Odoo core is the official `odoo:18`
+This repo is the **authoritative source** of the Odoo 19 solution. It ships a
+complete Docker stack (Odoo + PostgreSQL). Odoo core is the official `odoo:19`
 image (this repo's custom code lives in `/opt/extra-addons`); pin the image for
 reproducibility instead of vendoring the multi-hundred-MB Odoo source.
 
 ```
 docker-compose.yml            prod / Dokploy (Odoo + Postgres)
 docker-compose.override.yml   local dev overlay (ports, live mount, reload)
-Dockerfile                    odoo:18 + python reqs + entrypoint
+Dockerfile                    odoo:19 + python reqs + entrypoint
 docker/entrypoint.sh          render conf <- env, wait db, auto -i/-u, serve
 docker/odoo.conf.template     all odoo.conf keys <- ${ENV}
 .env.example                  every tunable
@@ -69,7 +69,7 @@ hot-reloads (`--dev=reload,qweb,xml`). Useful targets (`make help`):
 | `make odoo-shell` | odoo python shell |
 | `make psql`       | psql into the db |
 | `make upgrade`    | `-u` own modules (`m=mod1,mod2` to target) |
-| `make submodules` | bump `_vendor` to latest 18.0 |
+| `make submodules` | bump `_vendor` to latest 19.0 |
 
 > The override disables boot-time auto-upgrade so restarts are fast. Upgrade
 > explicitly with `make upgrade`.
@@ -78,7 +78,7 @@ hot-reloads (`--dev=reload,qweb,xml`). Useful targets (`make help`):
 
 ## Production via Dokploy
 
-1. **Create app** → type **Compose**, point it at this git repo, branch `18.0`,
+1. **Create app** → type **Compose**, point it at this git repo, branch `19.0`,
    compose file `docker-compose.yml` (the repo-root one — see "Root compose is a
    symlink" below). Enable **recursive submodule** clone so
    `third_party_addons/_vendor` is populated.
@@ -320,7 +320,7 @@ Prefer the subdomain scheme: nothing can strip it, no server-wide module, and
 db names double as documentation. Use the header only where a rename is truly
 impossible.
 
-**Renaming a db to fit the scheme:** Odoo 18's manager UI has no rename
+**Renaming a db to fit the scheme:** Odoo 19's manager UI has no rename
 button, but the RPC service still has one — it renames the database **and**
 its filestore in one call (`exp_rename`). It is gated by db management, so
 temporarily set `LIST_DB=True`, redeploy, then:
@@ -509,6 +509,52 @@ LANG_NOUPDATE=0                  # opt out; take upstream's values on every -u b
 
 Set the format once in the UI after the first boot with this enabled. It applies
 to the dbs named in `INIT_DB` and `UPGRADE_DB`.
+
+## Major-version upgrade (OpenUpgrade)
+
+The image is built with OpenUpgrade baked in (build arg `OPENUPGRADE=1`,
+compose var `OPENUPGRADE_BUILD`, default on): `openupgradelib` from git master
+plus `openupgrade_framework` + `openupgrade_scripts` of the matching OCA
+branch at `/opt/openupgrade`. It stays inert until a container boots with
+env `OPENUPGRADE=1`. Then, for every database in `UPGRADE_DB` not yet marked
+migrated, the entrypoint runs **once**:
+
+1. `odoo -u all` with OpenUpgrade on the addons path, `--upgrade-path` to its
+   scripts and `--load=base,web,openupgrade_framework` (the core migration).
+2. A plain `odoo -u all` without OpenUpgrade. The framework downgrades view
+   errors to `Can't render custom view` warnings, so step 1 exiting 0 proves
+   nothing about the views; this pass fails loudly on them.
+3. `odoo -i $INSTALL_MODULES`: `-u` never installs a dependency that is new in
+   the new version of a module (e.g. `pdf_xml_attachment` for
+   `account_invoice_import`); the module stays `to upgrade` until you list it.
+4. Sets `ir.config_parameter` `platform.openupgrade_done` = series, so a
+   restart with `OPENUPGRADE=1` still set skips the sequence.
+
+Any failing step aborts the boot without the mark; the next boot retries.
+Two full `-u all` passes outlast the default health-probe grace: set
+`HEALTHCHECK_START_PERIOD=900s` (or more) for that deploy. Remove
+`OPENUPGRADE=1` afterwards.
+
+**Rehearse first, on a neutralized copy, offline.** From the new-series
+checkout (own `.env`: own `COMPOSE_PROJECT_NAME`, image name, a fresh
+`ENCRYPTION_KEY` — never production's):
+
+```bash
+platform/scripts/rehearse-upgrade.sh /path/to/odoo_<date>.zip
+```
+
+It restores the backup, runs the product's `tools/neutralize_db.sql` (aborts
+unless its VERIFY block is clean) and `odoo neutralize` before any Odoo
+process touches the data, runs the entrypoint sequence above in one container,
+probes each not-yet-ported module on a throwaway copy, prints module states
+against the backup's `manifest.json`, and leaves the stack up at
+`http://localhost:$REHEARSAL_PORT`. Everything runs with
+`platform/docker-compose.rehearsal.yml`: db + odoo on an `internal` network
+(no egress), a socat gateway publishes the UI on 127.0.0.1 only.
+`ADDONS_SKIP_UNPORTED=1` (rehearsal/port stacks only, never production) keeps
+modules whose manifest version is not yet of the image's series off the
+addons path, so they neither break the run nor lose their data: they stay
+`to upgrade` until ported.
 
 ## Health probe
 

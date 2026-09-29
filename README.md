@@ -1,6 +1,6 @@
 # odoo-platform
 
-Shared Odoo 18 deployment machinery — Docker image, compose stack, entrypoint,
+Shared Odoo 19 deployment machinery — Docker image, compose stack, entrypoint,
 dev/ops Makefile, and the module-selection generator. Maintained **once** here;
 consumed by every product repo as a **git submodule at `platform/`**.
 

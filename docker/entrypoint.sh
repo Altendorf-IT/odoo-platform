@@ -69,6 +69,43 @@ done
 
 : "${ODOO_RC:=/var/lib/odoo/odoo.conf}"
 
+# ADDONS_SKIP_UNPORTED=1: load only modules whose manifest version belongs to
+# this image's Odoo series (19.0.x). For rehearsal/port stacks while some
+# modules are still on the previous series: an unported module on the path
+# breaks every registry load (Odoo prefixes its 18.0 version and tries to load
+# it), while one that is left OFF the path keeps its database rows untouched
+# in state 'to upgrade' until its port lands. Never set this in production —
+# a module skipped there silently stops working.
+: "${ADDONS_SKIP_UNPORTED:=}"
+if [ "$ADDONS_SKIP_UNPORTED" = "1" ]; then
+    _ported_dir=/tmp/ported-addons
+    ADDONS_PATH="$(python3 - "$ADDONS_PATH" "$_ported_dir" <<'PYEOF'
+import ast, os, shutil, sys
+from odoo import release
+paths, dest = sys.argv[1].split(","), sys.argv[2]
+shutil.rmtree(dest, ignore_errors=True)
+os.makedirs(dest)
+keep = []
+for path in paths:
+    if path.rstrip("/").endswith("odoo/addons"):   # core: always ported
+        keep.append(path)
+        continue
+    for name in sorted(os.listdir(path)):
+        manifest = os.path.join(path, name, "__manifest__.py")
+        if not os.path.isfile(manifest):
+            continue
+        version = str(ast.literal_eval(open(manifest).read()).get("version", ""))
+        if version.startswith(release.serie + "."):
+            os.symlink(os.path.realpath(os.path.join(path, name)), os.path.join(dest, name))
+        else:
+            print(f"[entrypoint] ADDONS_SKIP_UNPORTED: skipping {name} ({version or 'no version'})",
+                  file=sys.stderr)
+print(",".join(keep + [dest]))
+PYEOF
+)"
+    echo "[entrypoint] ADDONS_SKIP_UNPORTED: addons_path=$ADDONS_PATH"
+fi
+
 # Product-specific: no platform default — set UPGRADE_MODULES in the product's .env.
 : "${UPGRADE_MODULES:=}"
 : "${INSTALL_MODULES:=}"
@@ -250,7 +287,7 @@ from odoo.modules.registry import Registry
 conf, db, method = sys.argv[1], sys.argv[2], sys.argv[3]
 # setup_logging=True mirrors every odoo CLI command: it installs the log handler
 # (so the upgrade's own progress reaches the deploy log) and avoids the
-# PendingDeprecationWarning Odoo 18 raises when the choice is left implicit.
+# PendingDeprecationWarning Odoo 18+ raises when the choice is left implicit.
 # parse_config also runs initialize_sys_path(), which is what puts addons_path
 # in place — without it the registry cannot find our modules at all.
 odoo.tools.config.parse_config(["-c", conf], setup_logging=True)
@@ -323,6 +360,65 @@ if [ "$LANG_NOUPDATE" != "0" ] && [ "$LANG_NOUPDATE" != "False" ]; then
         case "$_db" in ""|False) continue ;; esac
         db_exists "$_db" || continue
         pin_lang_records "$_db"
+    done
+fi
+
+# OPENUPGRADE=1: migrate every UPGRADE_DB database from the previous Odoo
+# series ONCE, before the normal upgrade logic below. Needs an image built with
+# OPENUPGRADE=1 (/opt/openupgrade). Per database, in this order:
+#   1. OpenUpgrade `-u all`: core migration scripts + the framework loaded
+#      server-wide. The framework turns view validation errors into warnings
+#      ("Can't render custom view"), so exit 0 here does NOT mean the views work.
+#   2. Plain `-u all` without OpenUpgrade on the path: the reload that surfaces
+#      the view/data errors step 1 swallowed.
+#   3. `-i INSTALL_MODULES`: `-u` never installs a dependency that is new in the
+#      19 version of a module (pdf_xml_attachment for account_invoice_import,
+#      muk_web_group/muk_web_refresh for muk_web_theme); such a module is
+#      silently skipped and stays 'to upgrade' until its new deps are installed.
+#   4. Mark the database migrated (ir.config_parameter platform.openupgrade_done
+#      = series), so a restart with OPENUPGRADE=1 still set skips all of this.
+# Any failing step aborts the boot (set -e) WITHOUT the mark, so the next boot
+# retries the whole sequence. Restore a neutralized copy first — never run this
+# against the only copy of production.
+: "${OPENUPGRADE:=}"
+OPENUPGRADE_DIR=/opt/openupgrade
+if [ "$OPENUPGRADE" = "1" ] && [ -n "$UPGRADE_DB" ] && [ "$UPGRADE_DB" != "False" ]; then
+    if [ ! -d "$OPENUPGRADE_DIR/openupgrade_framework" ]; then
+        echo "[entrypoint] ERROR: OPENUPGRADE=1 but $OPENUPGRADE_DIR is missing —" >&2
+        echo "[entrypoint]        build the image with the build arg OPENUPGRADE=1." >&2
+        exit 1
+    fi
+    _serie="$(python3 -c 'from odoo import release; print(release.serie)')"
+    IFS=',' read -ra _ou_dbs <<< "$UPGRADE_DB"
+    for _db in "${_ou_dbs[@]}"; do
+        _db="$(echo "$_db" | xargs)"
+        [ -z "$_db" ] && continue
+        db_exists "$_db" || continue
+        _done="$(PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -tAc \
+            "SELECT value FROM ir_config_parameter WHERE key='platform.openupgrade_done'" "$_db")"
+        if [ "$_done" = "$_serie" ]; then
+            echo "[entrypoint] OPENUPGRADE: '$_db' already migrated to $_serie — skipping"
+            continue
+        fi
+        echo "[entrypoint] ===== OPENUPGRADE $_db -> $_serie: step 1/4 OpenUpgrade -u all ====="
+        odoo -c "$ODOO_RC" -d "$_db" \
+            --addons-path="$OPENUPGRADE_DIR,$ADDONS_PATH" \
+            --upgrade-path="$OPENUPGRADE_DIR/openupgrade_scripts/scripts" \
+            --load=base,web,openupgrade_framework \
+            -u all --stop-after-init
+        echo "[entrypoint] ===== OPENUPGRADE $_db: step 2/4 plain -u all (surfaces view errors) ====="
+        odoo -c "$ODOO_RC" -d "$_db" -u all --stop-after-init
+        if [ -n "$INSTALL_MODULES" ]; then
+            echo "[entrypoint] ===== OPENUPGRADE $_db: step 3/4 -i $INSTALL_MODULES ====="
+            odoo -c "$ODOO_RC" -d "$_db" -i "$INSTALL_MODULES" --stop-after-init
+        else
+            echo "[entrypoint] ===== OPENUPGRADE $_db: step 3/4 skipped (INSTALL_MODULES empty) ====="
+        fi
+        PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -qc \
+            "DELETE FROM ir_config_parameter WHERE key='platform.openupgrade_done';
+             INSERT INTO ir_config_parameter (key, value, create_date, write_date)
+             VALUES ('platform.openupgrade_done', '$_serie', now(), now())" "$_db"
+        echo "[entrypoint] ===== OPENUPGRADE $_db: step 4/4 marked migrated ($_serie) ====="
     done
 fi
 

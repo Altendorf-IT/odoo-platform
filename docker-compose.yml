@@ -1,4 +1,4 @@
-# Production / Dokploy stack: Odoo 18 + PostgreSQL.
+# Production / Dokploy stack: Odoo 19 + PostgreSQL.
 #
 # This file lives in the odoo-platform SUBMODULE and is consumed from a product
 # repo root via the product's thin docker-compose.yml:
@@ -77,11 +77,13 @@ services:
       context: .                       # product repo root
       dockerfile: platform/Dockerfile
       args:
-        ODOO_IMAGE: ${ODOO_IMAGE:-odoo:18.0}
+        ODOO_IMAGE: ${ODOO_IMAGE:-odoo:19.0}
         INSTALL_VENDOR_REQS: ${INSTALL_VENDOR_REQS:-1}
         # Apt mirror override for hosts with a bad path to Canonical
         # (e.g. https://mirror.23m.com/ubuntu). Empty = upstream.
         APT_MIRROR: ${APT_MIRROR:-}
+        # Bake OpenUpgrade into the image (inert unless OPENUPGRADE=1 at runtime).
+        OPENUPGRADE: ${OPENUPGRADE_BUILD:-1}
     image: ${IMAGE_NAME:-odoo-product}:${IMAGE_TAG:-latest}
     pull_policy: build          # local build image — never try to pull from a registry
     restart: unless-stopped
@@ -156,6 +158,14 @@ services:
       UPGRADE_MODULES: ${UPGRADE_MODULES:-}
       ODOO_ADMIN_PASSWORD: ${ODOO_ADMIN_PASSWORD:-admin}
       UPGRADE_DB: ${UPGRADE_DB:-}
+      INIT_DB: ${INIT_DB:-}
+      # One-time major-version migration of the UPGRADE_DB databases on boot
+      # (OpenUpgrade, then a plain reload, then INSTALL_MODULES). See the
+      # OPENUPGRADE block in platform/docker/entrypoint.sh and DEPLOY.md.
+      OPENUPGRADE: ${OPENUPGRADE:-}
+      # Rehearsal/port stacks only: load only modules already ported to this
+      # series. Never in production (see entrypoint.sh).
+      ADDONS_SKIP_UNPORTED: ${ADDONS_SKIP_UNPORTED:-}
       # Keep UI-set language formats across upgrades — base's res.lang.csv is a
       # noupdate-less data file that -u base replays. See DEPLOY.md.
       LANG_NOUPDATE: ${LANG_NOUPDATE:-1}
@@ -197,7 +207,9 @@ services:
     # it are not counted, so an upgrade in progress never flaps the container.
     # The `-u all` fallback path can exceed even 5 minutes on a large database;
     # if that is normal for a deployment, raise HEALTHCHECK_START_PERIOD rather
-    # than lowering it. Docker's `timeout` must stay above HEALTHCHECK_TIMEOUT
+    # than lowering it. An OPENUPGRADE boot runs two full `-u all` passes: set
+    # HEALTHCHECK_START_PERIOD=900s (or more) for that deploy. Docker's
+    # `timeout` must stay above HEALTHCHECK_TIMEOUT
     # (the script's own HTTP timeout) or the script is killed before it answers.
     healthcheck:
       test: ["CMD", "python3", "/usr/local/bin/odoo-healthcheck.py"]

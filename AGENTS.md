@@ -4,7 +4,7 @@ Binding for the platform repo and every product repo built on it (product
 repos expose this file at their root as a symlink to `platform/AGENTS.md`).
 Every section applies to every response unless it says otherwise.
 
-## Odoo 18 syntax — hard rules
+## Odoo 19 syntax — hard rules
 
 - The old `<tree>` tag is gone. Use `<list>` — in views **and** in actions:
   `<field name="view_mode">list,form</field>` (never `tree,form`).
@@ -12,6 +12,15 @@ Every section applies to every response unless it says otherwise.
   `attrs="{'invisible': [('mode', '!=', 'tag')]}"`. Put the expression
   directly on the attribute instead: `invisible="mode != 'tag'"` — same for
   `readonly`, `required`, and `column_invisible`.
+- `_sql_constraints` is ignored (and the old PostgreSQL constraint is dropped
+  on upgrade). Declare `models.Constraint(...)` / `models.Index(...)` on the
+  model instead.
+- `res.groups` has no `category_id` any more, and `groups_id` is `group_ids`
+  (users, menus, views, actions).
+- Search views: `<group expand="0" string="Group By">` is invalid; use a bare
+  `<group>`.
+- Controllers: `@route(type='jsonrpc')`, not `type='json'`. Domains:
+  `odoo.fields.Domain`, not `odoo.osv.expression`.
 
 ## Decision records — mandatory practice
 

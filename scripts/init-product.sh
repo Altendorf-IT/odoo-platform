@@ -102,7 +102,7 @@ cat > .env.example <<TXT
 #   cp .env.example .env
 
 # --- Odoo base image ---------------------------------------------------------
-ODOO_IMAGE=odoo:18.0
+ODOO_IMAGE=odoo:19.0
 INSTALL_VENDOR_REQS=1
 IMAGE_NAME=${NAME}
 IMAGE_TAG=latest
@@ -252,7 +252,7 @@ __pycache__/
 TXT
 
 cat > README.md <<TXT
-# ${NAME} — Odoo 18 Product Repo
+# ${NAME} — Odoo 19 Product Repo
 
 Content-only repo (first-party modules + vendor selection + deploy config).
 All deployment machinery lives in the [odoo-platform](${PLATFORM_URL%.git})
@@ -274,7 +274,7 @@ src/
 make hooks
 
 # add a vendor repo, then pick its modules
-git submodule add -b 18.0 https://github.com/OCA/knowledge.git src/third_party_addons/_vendor/oca_knowledge
+git submodule add -b 19.0 https://github.com/OCA/knowledge.git src/third_party_addons/_vendor/oca_knowledge
 echo "_vendor/oca_knowledge/document_page" >> selection.txt
 make selection            # build _selected symlinks (commit them)
                           # + stubs a why-line in selection_reasons.md — write it,
@@ -319,7 +319,7 @@ on:
   workflow_dispatch:
 jobs:
   bump:
-    uses: ${PLATFORM_SLUG}/.github/workflows/bump-submodules.yml@18.0
+    uses: ${PLATFORM_SLUG}/.github/workflows/bump-submodules.yml@19.0
     secrets:
       BUMP_TOKEN: \${{ secrets.SUBMODULE_BUMP_PAT }}
 YAML
@@ -340,7 +340,7 @@ Done. '${NAME}' scaffolded in $TARGET
 Next:
   1. cd $TARGET
   2. Put first-party modules in src/custom_addons/
-  3. Add vendor repos: git submodule add -b 18.0 <url> src/third_party_addons/_vendor/<name>
+  3. Add vendor repos: git submodule add -b 19.0 <url> src/third_party_addons/_vendor/<name>
      then list modules in selection.txt and run: make selection
      (then write the why-lines it stubs into selection_reasons.md)
   4. Set OWN_MODULES in the Makefile

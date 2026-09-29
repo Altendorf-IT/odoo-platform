@@ -1,12 +1,12 @@
 # syntax=docker/dockerfile:1
 #
-# Authoritative deploy image for an Odoo 18 product repo that consumes this
+# Authoritative deploy image for an Odoo 19 product repo that consumes this
 # platform as a submodule at ./platform. Build context = PRODUCT repo root
 # (see platform/docker-compose.yml).
-# Base = official Odoo 18 image (clean upstream == our checkout). Pin it for
+# Base = official Odoo 19 image (clean upstream == our checkout). Pin it for
 # reproducibility via ODOO_IMAGE (tag or, better, a sha256 digest) in .env.
 #
-ARG ODOO_IMAGE=odoo:18.0
+ARG ODOO_IMAGE=odoo:19.0
 FROM ${ODOO_IMAGE}
 
 USER root
@@ -99,7 +99,7 @@ RUN --mount=type=bind,source=requirements.txt,target=/tmp/src/requirements.txt \
         echo "[build] $count vendor requirements file(s) installed"; \
         # Fallback: manifest external_dependencies for modules with no
         # requirements.txt anywhere between them and their vendor root.
-        # Odoo 18 checks these names against installed dist metadata, so
+        # Odoo 19 checks these names against installed dist metadata, so
         # pip-installing them verbatim is exactly what the check expects.
         python3 /tmp/src/manifest-pydeps.py \
              /tmp/src/third_party_addons/_vendor \
@@ -111,6 +111,33 @@ RUN --mount=type=bind,source=requirements.txt,target=/tmp/src/requirements.txt \
     fi; \
     if [ -f /tmp/src/requirements.txt ]; then \
         pip install --break-system-packages -r /tmp/src/requirements.txt; \
+    fi
+
+# OpenUpgrade (major-version migration, see OPENUPGRADE in entrypoint.sh).
+# OPENUPGRADE=1 bakes in openupgradelib and the OpenUpgrade framework +
+# migration scripts at /opt/openupgrade; they stay inert until the container
+# runs with env OPENUPGRADE=1. openupgradelib comes from git master: the PyPI
+# release (3.13.x) dies on import under Odoo 19 ("module 'odoo' has no
+# attribute 'fields'", OCA/openupgradelib#448). Master imports fine once Odoo
+# itself is loaded (as it is inside a migration run), hence the odoo imports in
+# the check. Tarballs instead of git clones: the image has curl but no git
+# (so setuptools-scm needs a pretend version). The branch moves, so rebuild
+# with --no-cache before a real migration to pick up the latest scripts.
+ARG OPENUPGRADE=1
+ARG OPENUPGRADE_BRANCH=19.0
+RUN set -eux; \
+    if [ "$OPENUPGRADE" = "1" ]; then \
+        SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0+master pip install --break-system-packages \
+            https://github.com/OCA/openupgradelib/archive/refs/heads/master.tar.gz; \
+        (cd /tmp && python3 -c "import odoo.cli, odoo.api, odoo.fields, odoo.models; \
+            from openupgradelib import openupgrade"); \
+        mkdir -p /opt/openupgrade; \
+        curl -fsSL "https://github.com/OCA/OpenUpgrade/archive/refs/heads/${OPENUPGRADE_BRANCH}.tar.gz" \
+            | tar -xz -C /opt/openupgrade --strip-components=1 \
+                "OpenUpgrade-${OPENUPGRADE_BRANCH}/openupgrade_framework" \
+                "OpenUpgrade-${OPENUPGRADE_BRANCH}/openupgrade_scripts"; \
+        test -f /opt/openupgrade/openupgrade_framework/__manifest__.py; \
+        test -d /opt/openupgrade/openupgrade_scripts/scripts; \
     fi
 
 # Now copy the src tree for runtime.

@@ -1,0 +1,36 @@
+# Rehearsal overlay: run a restored, neutralized production copy with NO
+# internet egress. From the PRODUCT repo root:
+#
+#   docker compose -f docker-compose.yml -f platform/docker-compose.rehearsal.yml up -d
+#
+# (or list both in COMPOSE_FILE in the rehearsal checkout's .env). Used by
+# platform/scripts/rehearse-upgrade.sh.
+#
+#   * db + odoo sit ONLY on an `internal: true` network: no route out, so a
+#     cron, mail or bank pull that neutralization missed still cannot reach a
+#     real service.
+#   * Docker cannot publish ports of a container that is only on an internal
+#     network, so a tiny socat gateway (on both networks) forwards
+#     127.0.0.1:${REHEARSAL_PORT} to odoo. Run odoo with WORKERS=0 so the
+#     websocket shares the HTTP port.
+
+services:
+  db:
+    networks: [internal]
+
+  odoo:
+    networks: [internal]
+
+  gateway:
+    image: alpine/socat:latest
+    restart: unless-stopped
+    depends_on: [odoo]
+    command: ["tcp-listen:8069,fork,reuseaddr", "tcp-connect:odoo:${HTTP_PORT:-8069}"]
+    ports:
+      - "127.0.0.1:${REHEARSAL_PORT:-8169}:8069"
+    networks: [internal, egress]
+
+networks:
+  internal:
+    internal: true
+  egress: {}

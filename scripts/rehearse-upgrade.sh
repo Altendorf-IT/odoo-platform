@@ -174,11 +174,14 @@ for n in sorted(unported):
             continue
         seen.add(x)
         todo += mods[x][1].get("depends", [])
-    # addons for this probe: every ported module + this one and its unported deps
-    print(n, " ".join(ported + [mods[x][0] for x in sorted(seen)]))
+    # addons for this probe: every ported module (linked) + this one and its
+    # unported deps (copied, version bumped to this series so Odoo loads them)
+    print("UNPORTED", n, " ".join(ported), "--", " ".join(mods[x][0] for x in sorted(seen)))
 PYEOF
     : > "$OUT/probe.txt"
-    while read -r mod paths; do
+    # fd 3: `docker compose exec/run` inside the loop would swallow stdin.
+    # grep: `run` may print build output first (pull_policy: build).
+    while read -r _ mod paths <&3; do
         state=$("${PSQL[@]}" -At -d "$REHEARSE_DB" -c "SELECT state FROM ir_module_module WHERE name='$mod'")
         if [ "$state" != "to upgrade" ] && [ "$state" != "installed" ]; then
             printf '%-48s not installed in the backup (%s) — skipped\n' "$mod" "${state:-absent}" | tee -a "$OUT/probe.txt"
@@ -186,21 +189,35 @@ PYEOF
         fi
         "${PSQL[@]}" -d postgres -c "DROP DATABASE IF EXISTS probe WITH (FORCE)" \
                                  -c "CREATE DATABASE probe TEMPLATE \"$REHEARSE_DB\""
-        "${RUN[@]}" --entrypoint bash odoo -c "mkdir -p /tmp/probe && ln -s $paths /tmp/probe/ && \
-            odoo $DBARGS -d probe --addons-path=/usr/lib/python3/dist-packages/odoo/addons,/tmp/probe \
-            -u $mod --stop-after-init" > "$OUT/probe-$mod.log" 2>&1 || true
-        first=$(grep -m1 -E ' (ERROR|CRITICAL) |^[A-Za-z]*(Error|Exception): ' "$OUT/probe-$mod.log" \
+        "${RUN[@]}" -e LINKED="${paths% -- *}" -e COPIED="${paths#* -- }" -e MOD="$mod" \
+            -e DBARGS="$DBARGS" --entrypoint bash odoo -s > "$OUT/probe-$mod.log" 2>&1 <<'SH' || true
+set -e
+mkdir -p /tmp/probe
+ln -s $LINKED /tmp/probe/
+cp -rL $COPIED /tmp/probe/
+serie=$(python3 -c 'from odoo import release; print(release.serie)')
+for d in $COPIED; do
+    sed -i -E "s/([\"']version[\"'][[:space:]]*:[[:space:]]*[\"'])[0-9]+\.0\./\1$serie./" \
+        "/tmp/probe/$(basename "$d")/__manifest__.py"
+done
+eval "exec odoo $DBARGS -d probe --addons-path=/usr/lib/python3/dist-packages/odoo/addons,/tmp/probe \
+    -u $MOD --stop-after-init"
+SH
+        first=$(grep -v 'inconsistent states' "$OUT/probe-$mod.log" \
+            | grep -m1 -E ' (ERROR|CRITICAL) |^[A-Za-z]*(Error|Exception): ' \
             | sed -E 's/^[0-9-]+ [0-9:,]+ [0-9]+ //' | cut -c1-300 || true)
         last=$(grep -E '^[A-Za-z.]*(Error|Exception|ParseError)[:(]' "$OUT/probe-$mod.log" | tail -1 | cut -c1-300 || true)
-        printf '%-48s %s\n%-48s %s\n' "$mod" "${first:-OK (no ERROR)}" "" "${last}" | tee -a "$OUT/probe.txt"
-    done < "$WORK/unported.txt"
+        # A missing dependency skips the module without any ERROR line.
+        skipped=$(grep -m1 -E "module $mod: .*skipped" "$OUT/probe-$mod.log" | sed -E 's/.*module_graph: //' || true)
+        printf '%-48s %s\n%-48s %s\n' "$mod" "${first:-${skipped:-OK (no ERROR)}}" "" "${last}" | tee -a "$OUT/probe.txt"
+    done 3< <(grep '^UNPORTED ' "$WORK/unported.txt")
     "${PSQL[@]}" -d postgres -c "DROP DATABASE IF EXISTS probe WITH (FORCE)"
 fi
 
 # --- e. report + serve --------------------------------------------------------
 say "e. module states vs manifest.json"
 "${PSQL[@]}" -At -F'|' -d "$REHEARSE_DB" \
-    -c "SELECT name, state, coalesce(latest_version,'') FROM ir_module_module WHERE state <> 'uninstalled'" \
+    -c "SELECT name, state, coalesce(latest_version,'') FROM ir_module_module WHERE state NOT IN ('uninstalled', 'uninstallable')" \
     > "$WORK/states.txt"
 python3 - "$WORK/manifest.json" "$WORK/states.txt" <<'PYEOF' | tee "$OUT/modules.txt"
 import json, sys

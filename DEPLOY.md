@@ -645,6 +645,140 @@ hard error rather than a silent fallback — a half-configured key would otherwi
 look like it worked while still storing plaintext. `$ODOO_RC` is `chmod 600`
 since it now carries the key alongside `db_password` and `admin_passwd`.
 
+## Backups (nightly, encrypted, off-site)
+
+The `backup` service is a small container beside `db` and `odoo`. It does not
+need Odoo. Each night it does this for every database in `BACKUP_DBS`:
+
+1. `pg_dump` in custom format, then a `tar.gz` of the filestore.
+2. Both are encrypted with [`age`](https://age-encryption.org) and your
+   **public** key before they leave the container. The server holds no key
+   that can decrypt a backup.
+3. Upload by SFTP: `<db>_<UTC stamp>.dump.age`,
+   `<db>_<UTC stamp>.filestore.tar.gz.age`, and last `<db>_<UTC stamp>.sha256`.
+   A backup without its `.sha256` file is not complete.
+4. Only when all uploads worked: delete the remote files of these databases
+   that are older than `BACKUP_KEEP_DAYS`.
+5. Tell the monitor: `BACKUP_PING_URL/start` at the start, `BACKUP_PING_URL` on
+   success, `BACKUP_PING_URL/fail` on failure. The exit code is not 0 on failure
+   and the container log names the failed step.
+
+All files are in `platform/backup/` (image) and
+`platform/docker-compose.backup.yml` (overlay).
+
+### Setup (one time)
+
+1. **Make the key pair on your own computer, not on the server.**
+
+   ```bash
+   brew install age            # or: apt install age
+   age-keygen -o age-key.txt   # prints "Public key: age1..."
+   ```
+
+   Put the full contents of `age-key.txt` in the password manager, then delete
+   the file. Without this private key nobody can read a backup. There is no
+   recovery path. The public key (`age1...`) is not a secret.
+2. **Get the host key of the SFTP server** (one line):
+
+   ```bash
+   ssh-keyscan -t ed25519 sftp.example.com     # add -p PORT if not 22
+   ```
+
+   Compare it with the fingerprint that the provider shows, then use the full
+   line as `BACKUP_SFTP_HOST_KEY`. The backup refuses a server with another key.
+3. **Make the remote directory** (`BACKUP_SFTP_DIR`). The backup does not make it.
+4. **Make a check on a ping monitor** (for example healthchecks.io: period
+   1 day, grace 2 hours, alert by mail). Use its URL as `BACKUP_PING_URL`. The
+   monitor also alerts when no backup started at all (server down, container
+   gone). A mail from the container cannot do that.
+5. **Set the environment** (Dokploy → Environment, or `.env`). Never put these
+   values in git or in the database:
+
+   | Variable | Example | Meaning |
+   |---|---|---|
+   | `COMPOSE_FILE` | `docker-compose.yml:platform/docker-compose.backup.yml` | turns the overlay on |
+   | `BACKUP_DBS` | `odoo` | database names, separated by spaces |
+   | `BACKUP_AGE_RECIPIENT` | `age1...` | the public key |
+   | `BACKUP_SFTP_HOST`, `BACKUP_SFTP_PORT` | `sftp.example.com`, `22` | target server |
+   | `BACKUP_SFTP_USER`, `BACKUP_SFTP_PASSWORD` | | login. Leave the password empty to use an SSH key mounted at `/root/.ssh` |
+   | `BACKUP_SFTP_DIR` | `backups/odoo` | remote directory, must exist |
+   | `BACKUP_SFTP_HOST_KEY` | `sftp.example.com ssh-ed25519 AAAA...` | the line from step 2 |
+   | `BACKUP_KEEP_DAYS` | `50` (default) | delete remote files older than this |
+   | `BACKUP_SCHEDULE` | `30 2 * * *` (default) | cron expression, **UTC** |
+   | `BACKUP_PING_URL` | `https://hc-ping.com/<uuid>` | monitor URL from step 4 |
+
+   The database login comes from `DB_USER` / `DB_PASSWORD`.
+6. **Deploy, then run one backup by hand** and look at the result:
+
+   ```bash
+   docker compose exec backup backup.sh        # or the Dokploy terminal of `backup`
+   ```
+
+   The last line must be `backup: OK <stamp>`, the three files must be on the
+   SFTP server, and the monitor must show a success.
+
+If a required variable is missing, the `backup` container stops at start with
+`backup: ERROR: <NAME> is not set` and restarts in a loop. The container needs
+free disk space for one encrypted backup set (it is written to `/tmp` first).
+
+### What is NOT in the backup
+
+- **The environment.** `ENCRYPTION_KEY`, `RUNNING_ENV`, `DB_PASSWORD`,
+  `ADMIN_PASSWD`, the `BACKUP_*` values and API keys live in Dokploy only.
+  Without `ENCRYPTION_KEY` the restored database cannot decrypt its stored
+  secrets (for example the Enable Banking key). **Keep a copy of the full
+  Dokploy environment in the password manager** and update it when it changes.
+- The private age key (password manager only).
+- Databases that are not in `BACKUP_DBS`, Postgres roles, Odoo sessions.
+- The code. It is in git.
+
+### Restore runbook
+
+A backup counts only after one restore worked. Do a restore test after the
+setup and again after each major change.
+
+Do the test **on your own computer or on a staging stack, not on production**:
+a restored copy of production still has active crons, mail servers and bank
+connections. If the copy must be on a server where Odoo runs, stop the `odoo`
+service first.
+
+1. Use a checkout of the product repo with the same `BACKUP_SFTP_*` values and
+   `COMPOSE_FILE` in `.env`. Start only the database: `docker compose up -d db`.
+2. Write the private key from the password manager to a file, for example
+   `~/age-key.txt` (`chmod 600`).
+3. Restore. `latest` is the newest complete backup; a stamp such as
+   `20261024T023000Z` selects one backup:
+
+   ```bash
+   docker compose run --rm -v ~/age-key.txt:/age-key.txt:ro \
+     backup-restore <source_db> latest <target_db>
+   ```
+
+   The script downloads the three files, checks the SHA-256 sums, decrypts,
+   makes the database `<target_db>`, runs `pg_restore`, and unpacks the
+   filestore to `/var/lib/odoo/filestore/<target_db>`. It never overwrites: it
+   stops if the database or the filestore directory exists.
+4. Delete `~/age-key.txt`.
+5. **Test copy:** neutralize it before Odoo starts on it (the product's
+   `tools/neutralize_db.sql`). **Real recovery:** do not neutralize; set the
+   environment from the password manager (`ENCRYPTION_KEY`, `RUNNING_ENV`, ...)
+   and use the production database name as `<target_db>`.
+6. Start Odoo, log in, open one attachment (filestore) and one record with a
+   stored secret (for example Enable Banking → Check Connection in a real
+   recovery).
+
+### Test the scripts
+
+```bash
+platform/scripts/test-backup-restore.sh
+```
+
+It needs only Docker. It starts a throwaway Postgres, SFTP server and ping
+receiver, then checks: backup, retention, the failure ping, a restore with a
+wrong key, a restore with the right key (table checksum and file checksums
+equal), and that a second restore does not overwrite. Run it after each change
+in `platform/backup/`.
+
 ## Python requirements
 The image installs, at build time:
 - every `third_party_addons/{_vendor,_static_vendor}/*/requirements.txt`

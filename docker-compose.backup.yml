@@ -1,0 +1,46 @@
+# Opt-in overlay: nightly encrypted off-site backup (pg_dump + filestore ->
+# age -> SFTP). Enable it in the product's .env:
+#   COMPOSE_FILE=docker-compose.yml:platform/docker-compose.backup.yml
+# Setup, variables and the restore runbook: platform/DEPLOY.md, "Backups".
+
+x-backup: &backup
+  build:
+    context: ./platform/backup
+  image: ${IMAGE_NAME:-odoo-product}-backup:${IMAGE_TAG:-latest}
+  pull_policy: build
+  depends_on:
+    db:
+      condition: service_healthy
+  environment: &backup-env
+    PGHOST: db
+    PGPORT: 5432
+    PGUSER: ${DB_USER:-odoo}
+    PGPASSWORD: ${DB_PASSWORD:-odoo}
+    BACKUP_DBS: ${BACKUP_DBS:-}
+    BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-30 2 * * *}
+    BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-50}
+    BACKUP_AGE_RECIPIENT: ${BACKUP_AGE_RECIPIENT:-}
+    BACKUP_SFTP_HOST: ${BACKUP_SFTP_HOST:-}
+    BACKUP_SFTP_PORT: ${BACKUP_SFTP_PORT:-22}
+    BACKUP_SFTP_USER: ${BACKUP_SFTP_USER:-}
+    BACKUP_SFTP_PASSWORD: ${BACKUP_SFTP_PASSWORD:-}
+    BACKUP_SFTP_DIR: ${BACKUP_SFTP_DIR:-}
+    BACKUP_SFTP_HOST_KEY: ${BACKUP_SFTP_HOST_KEY:-}
+    BACKUP_PING_URL: ${BACKUP_PING_URL:-}
+
+services:
+  backup:
+    <<: *backup
+    restart: unless-stopped
+    volumes:
+      - odoo-data:/var/lib/odoo:ro     # the backup never writes to the filestore
+
+  # Not started by `up`. Run by hand:
+  #   docker compose run --rm -v /path/to/age-key.txt:/age-key.txt:ro \
+  #     backup-restore <source_db> <stamp|latest> <target_db>
+  backup-restore:
+    <<: *backup
+    profiles: ["restore"]
+    entrypoint: ["/usr/local/bin/restore.sh"]
+    volumes:
+      - odoo-data:/var/lib/odoo

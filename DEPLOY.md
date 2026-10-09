@@ -205,6 +205,19 @@ Two ways to run the proxy:
   (`/` → 8069 and `/websocket` → 8072), or use the `${DOMAIN}` labels in
   `docker-compose.yml`. Traefik sets `X-Forwarded-*` and terminates TLS; you
   publish nothing. The `/websocket` route is required when `WORKERS>0`.
+
+  Dokploy's Traefik sends responses **uncompressed** unless told otherwise, and
+  Odoo never compresses on its own — the backend JS bundle alone is several MB
+  raw and is re-downloaded after every deploy (its hash changes). Enable it once
+  per host, for every site behind that Traefik: define a `compress` middleware
+  in `/etc/dokploy/traefik/dynamic/middlewares.yml` (exclude
+  `text/event-stream`, compression buffers SSE) and attach `compress@file`
+  under `entryPoints.websecure.http.middlewares` in
+  `/etc/dokploy/traefik/traefik.yml`, then reload Traefik (static config; all
+  sites blink). The Domains UI cannot attach middlewares. Verify with a GET —
+  `curl -I` is a HEAD, has no body, and never shows `content-encoding`:
+  `curl -s -o /dev/null -H 'Accept-Encoding: gzip, br' -w '%header{content-encoding}\n' https://<host>/web/login`.
+  The self-managed nginx below already has `gzip on`.
 - **Self-managed nginx** (mirrors your current vhost exactly):
   ```bash
   docker compose -f docker-compose.yml -f docker-compose.nginx.yml up -d

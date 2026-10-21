@@ -33,6 +33,9 @@
 **/*.pot
 !src/custom_addons/**/i18n
 !src/custom_addons/**/i18n/**
+# organize_urself is ours too, only vendored: its catalogs are the product.
+!src/third_party_addons/_vendor/organize_urself/**/i18n
+!src/third_party_addons/_vendor/organize_urself/**/i18n/**
 
 # === Docs not needed at runtime ===
 **/doc/

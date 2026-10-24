@@ -676,8 +676,14 @@ need Odoo. Each night it does this for every database in `BACKUP_DBS`:
    success, `BACKUP_PING_URL/fail` on failure. The exit code is not 0 on failure
    and the container log names the failed step.
 
-All files are in `platform/backup/` (image) and
-`platform/docker-compose.backup.yml` (overlay).
+All files are in `platform/backup/` (image). The services `backup` and
+`backup-restore` are in `platform/docker-compose.yml`, in the profiles
+`backup` and `restore`. They do not start unless you set
+`COMPOSE_PROFILES=backup`. This is a profile, not an overlay file: Dokploy runs
+`docker compose -p <app> --env-file .env -f <Compose Path> up -d --build`
+with exactly one `-f`, so it ignores `COMPOSE_FILE`. Compose reads
+`COMPOSE_PROFILES` from that `.env`. Keep the Compose Path
+`./docker-compose.yml`.
 
 ### Setup (one time)
 
@@ -697,8 +703,12 @@ All files are in `platform/backup/` (image) and
    ssh-keyscan -t ed25519 sftp.example.com     # add -p PORT if not 22
    ```
 
-   Compare it with the fingerprint that the provider shows, then use the full
-   line as `BACKUP_SFTP_HOST_KEY`. The backup refuses a server with another key.
+   If the server has no ed25519 key, the command prints only a `#` line. Then
+   remove `-t ed25519` and use the one key line that it prints (for example
+   `ssh-rsa`). With a port that is not 22 the line starts with
+   `[host]:PORT`; keep it like that. Compare it with the fingerprint that the
+   provider shows (`ssh-keygen -lf <file>`), then use the full line as
+   `BACKUP_SFTP_HOST_KEY`. The backup refuses a server with another key.
 3. **Make the remote directory** (`BACKUP_SFTP_DIR`). The backup does not make it.
 4. **Make a check on a ping monitor** (for example healthchecks.io: period
    1 day, grace 2 hours, alert by mail). Use its URL as `BACKUP_PING_URL`. The
@@ -709,7 +719,7 @@ All files are in `platform/backup/` (image) and
 
    | Variable | Example | Meaning |
    |---|---|---|
-   | `COMPOSE_FILE` | `docker-compose.yml:platform/docker-compose.backup.yml` | turns the overlay on |
+   | `COMPOSE_PROFILES` | `backup` | turns the `backup` service on |
    | `BACKUP_DBS` | `odoo` | database names, separated by spaces |
    | `BACKUP_AGE_RECIPIENT` | `age1...` | the public key |
    | `BACKUP_SFTP_HOST`, `BACKUP_SFTP_PORT` | `sftp.example.com`, `22` | target server |
@@ -725,6 +735,7 @@ All files are in `platform/backup/` (image) and
 
    ```bash
    docker compose exec backup backup.sh        # or the Dokploy terminal of `backup`
+   docker exec <project>-backup-1 backup.sh    # on the host; <project> = Dokploy app name
    ```
 
    The last line must be `backup: OK <stamp>`, the three files must be on the
@@ -755,8 +766,8 @@ a restored copy of production still has active crons, mail servers and bank
 connections. If the copy must be on a server where Odoo runs, stop the `odoo`
 service first.
 
-1. Use a checkout of the product repo with the same `BACKUP_SFTP_*` values and
-   `COMPOSE_FILE` in `.env`. Start only the database: `docker compose up -d db`.
+1. Use a checkout of the product repo with the same `BACKUP_SFTP_*` values in
+   `.env`. Start only the database: `docker compose up -d db`.
 2. Write the private key from the password manager to a file, for example
    `~/age-key.txt` (`chmod 600`).
 3. Restore. `latest` is the newest complete backup; a stamp such as

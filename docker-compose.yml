@@ -15,6 +15,37 @@
 #
 # All tunables come from the product's .env (see its .env.example).
 
+# Nightly encrypted off-site backup (pg_dump + filestore -> age -> SFTP).
+# Off by default: the services below are in the `backup` / `restore` profiles.
+# Turn the nightly job on with COMPOSE_PROFILES=backup in the product's .env
+# (Dokploy -> Environment). Not an overlay file: Dokploy runs compose with one
+# explicit -f, so COMPOSE_FILE overlays never load there. Setup, variables and
+# the restore runbook: platform/DEPLOY.md, "Backups".
+x-backup: &backup
+  build:
+    context: ./platform/backup
+  image: ${IMAGE_NAME:-odoo-product}-backup:${IMAGE_TAG:-latest}
+  pull_policy: build
+  depends_on:
+    db:
+      condition: service_healthy
+  environment:
+    PGHOST: db
+    PGPORT: 5432
+    PGUSER: ${DB_USER:-odoo}
+    PGPASSWORD: ${DB_PASSWORD:-odoo}
+    BACKUP_DBS: ${BACKUP_DBS:-}
+    BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-30 2 * * *}
+    BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-50}
+    BACKUP_AGE_RECIPIENT: ${BACKUP_AGE_RECIPIENT:-}
+    BACKUP_SFTP_HOST: ${BACKUP_SFTP_HOST:-}
+    BACKUP_SFTP_PORT: ${BACKUP_SFTP_PORT:-22}
+    BACKUP_SFTP_USER: ${BACKUP_SFTP_USER:-}
+    BACKUP_SFTP_PASSWORD: ${BACKUP_SFTP_PASSWORD:-}
+    BACKUP_SFTP_DIR: ${BACKUP_SFTP_DIR:-}
+    BACKUP_SFTP_HOST_KEY: ${BACKUP_SFTP_HOST_KEY:-}
+    BACKUP_PING_URL: ${BACKUP_PING_URL:-}
+
 services:
   db:
     image: postgres:16
@@ -243,6 +274,23 @@ services:
     # (subdomain == db name, any case) no extra labels are needed. Free-form
     # db names instead need dbfilter_from_header + a per-host headers
     # middleware — see DEPLOY.md "Host -> database routing".
+
+  backup:
+    <<: *backup
+    profiles: ["backup"]
+    restart: unless-stopped
+    volumes:
+      - odoo-data:/var/lib/odoo:ro     # the backup never writes to the filestore
+
+  # Not started by `up`. Run by hand (naming the service selects its profile):
+  #   docker compose run --rm -v /path/to/age-key.txt:/age-key.txt:ro \
+  #     backup-restore <source_db> <stamp|latest> <target_db>
+  backup-restore:
+    <<: *backup
+    profiles: ["restore"]
+    entrypoint: ["/usr/local/bin/restore.sh"]
+    volumes:
+      - odoo-data:/var/lib/odoo
 
 volumes:
   db-data:

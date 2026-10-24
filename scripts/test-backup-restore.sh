@@ -12,7 +12,7 @@ IMG=$PFX-image
 SRC=${PFX//-/_}_src DST=${PFX//-/_}_dst
 TMP=$(mktemp -d)
 cleanup() {
-    docker rm -f -v "$PFX-pg" "$PFX-sftp" "$PFX-ping" > /dev/null 2>&1 || true
+    docker rm -f -v "$PFX-pg" "$PFX-sftp" "$PFX-ping" "$PFX-idle" > /dev/null 2>&1 || true
     docker network rm "$PFX-net" > /dev/null 2>&1 || true
     rm -rf "$TMP"
 }
@@ -70,6 +70,20 @@ run() {  # run <filestore dir> <BACKUP_DBS> <command...>
 }
 remote() { docker exec "$PFX-sftp" ls /home/bkp/odoo; }
 pings() { docker logs "$PFX-ping" 2>&1 | grep -c "GET /ping/test$1 " || true; }
+
+echo "--- 0. not set up"
+docker run -d --name "$PFX-idle" "$IMG" > /dev/null
+sleep 3
+[ "$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' "$PFX-idle")" = "true 0" ] \
+    || fail "no BACKUP_DBS: container is not running"
+[ "$(docker logs "$PFX-idle" 2>&1)" = "backup: off, BACKUP_DBS is not set" ] || fail "no BACKUP_DBS: wrong log"
+t0=$(date +%s); docker stop "$PFX-idle" > /dev/null; t1=$(date +%s)
+[ "$(docker inspect -f '{{.State.ExitCode}}' "$PFX-idle")" = 0 ] && [ $((t1 - t0)) -lt 5 ] \
+    || fail "no BACKUP_DBS: docker stop is slow or exit code not 0"
+ok "no BACKUP_DBS: logs one line, idles (no exit, no restart), stops at once with 0"
+if out=$(docker run --rm -e BACKUP_DBS=x "$IMG" 2>&1); then fail "incomplete setup exited 0"; fi
+[ "$out" = "backup: ERROR: BACKUP_AGE_RECIPIENT is not set" ] || fail "incomplete setup: wrong log: $out"
+ok "BACKUP_DBS set, other variable missing: stops with 'backup: ERROR: BACKUP_AGE_RECIPIENT is not set'"
 
 echo "--- 1. backup + retention"
 run "$TMP/fs" "$SRC" backup

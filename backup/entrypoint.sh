@@ -4,8 +4,15 @@
 set -eu
 case "${1:-cron}" in
     cron)
-        # Stop at start when the setup is not complete: a container that
-        # restarts in a loop is easier to see than a backup that never runs.
+        # No BACKUP_DBS = backup not set up (local dev, demos, rehearsals):
+        # idle instead of a restart loop. The service starts with every stack.
+        if [ -z "${BACKUP_DBS:-}" ]; then
+            echo "backup: off, BACKUP_DBS is not set"
+            trap 'exit 0' TERM INT    # PID 1: stop at once on docker stop
+            while :; do sleep 86400 & wait $!; done
+        fi
+        # Set up but not complete: stop at start. A container that restarts
+        # in a loop is easier to see than a backup that never runs.
         . /usr/local/bin/lib.sh
         require BACKUP_DBS BACKUP_AGE_RECIPIENT BACKUP_SFTP_HOST BACKUP_SFTP_USER \
             BACKUP_SFTP_DIR BACKUP_SFTP_HOST_KEY

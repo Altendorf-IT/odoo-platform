@@ -16,11 +16,12 @@
 # All tunables come from the product's .env (see its .env.example).
 
 # Nightly encrypted off-site backup (pg_dump + filestore -> age -> SFTP).
-# Off by default: the services below are in the `backup` / `restore` profiles.
-# Turn the nightly job on with COMPOSE_PROFILES=backup in the product's .env
-# (Dokploy -> Environment). Not an overlay file: Dokploy runs compose with one
-# explicit -f, so COMPOSE_FILE overlays never load there. Setup, variables and
-# the restore runbook: platform/DEPLOY.md, "Backups".
+# The `backup` service starts with every stack. Without BACKUP_DBS it logs
+# "backup: off, BACKUP_DBS is not set" and idles; set the BACKUP_* variables in
+# the product's .env (Dokploy -> Environment) to turn the nightly job on. No
+# overlay file and no profile: Dokploy runs compose with one explicit -f (so
+# COMPOSE_FILE never loads) and does not apply COMPOSE_PROFILES. Setup,
+# variables and the restore runbook: platform/DEPLOY.md, "Backups".
 x-backup: &backup
   build:
     context: ./platform/backup
@@ -277,12 +278,12 @@ services:
 
   backup:
     <<: *backup
-    profiles: ["backup"]
     restart: unless-stopped
     volumes:
       - odoo-data:/var/lib/odoo:ro     # the backup never writes to the filestore
 
-  # Not started by `up`. Run by hand (naming the service selects its profile):
+  # Not started by `up` (profile `restore`). Run by hand; naming the service
+  # in `run` selects its profile:
   #   docker compose run --rm -v /path/to/age-key.txt:/age-key.txt:ro \
   #     backup-restore <source_db> <stamp|latest> <target_db>
   backup-restore:

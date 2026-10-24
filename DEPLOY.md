@@ -677,13 +677,15 @@ need Odoo. Each night it does this for every database in `BACKUP_DBS`:
    and the container log names the failed step.
 
 All files are in `platform/backup/` (image). The services `backup` and
-`backup-restore` are in `platform/docker-compose.yml`, in the profiles
-`backup` and `restore`. They do not start unless you set
-`COMPOSE_PROFILES=backup`. This is a profile, not an overlay file: Dokploy runs
+`backup-restore` are in `platform/docker-compose.yml`. The `backup` service
+starts with every stack. When `BACKUP_DBS` is empty, it writes one line,
+`backup: off, BACKUP_DBS is not set`, and does nothing more. Set the
+`BACKUP_*` variables to turn the nightly job on. `backup-restore` is in the
+profile `restore`: `up` does not start it, `docker compose run backup-restore`
+does. There is no overlay file and no profile for the nightly job: Dokploy runs
 `docker compose -p <app> --env-file .env -f <Compose Path> up -d --build`
-with exactly one `-f`, so it ignores `COMPOSE_FILE`. Compose reads
-`COMPOSE_PROFILES` from that `.env`. Keep the Compose Path
-`./docker-compose.yml`.
+with exactly one `-f`, so it ignores `COMPOSE_FILE`, and it does not apply
+`COMPOSE_PROFILES`. Keep the Compose Path `./docker-compose.yml`.
 
 ### Setup (one time)
 
@@ -719,8 +721,7 @@ with exactly one `-f`, so it ignores `COMPOSE_FILE`. Compose reads
 
    | Variable | Example | Meaning |
    |---|---|---|
-   | `COMPOSE_PROFILES` | `backup` | turns the `backup` service on |
-   | `BACKUP_DBS` | `odoo` | database names, separated by spaces |
+   | `BACKUP_DBS` | `odoo` | database names, separated by spaces. Empty = backup off |
    | `BACKUP_AGE_RECIPIENT` | `age1...` | the public key |
    | `BACKUP_SFTP_HOST`, `BACKUP_SFTP_PORT` | `sftp.example.com`, `22` | target server |
    | `BACKUP_SFTP_USER`, `BACKUP_SFTP_PASSWORD` | | login. Leave the password empty to use an SSH key mounted at `/root/.ssh` |
@@ -741,9 +742,11 @@ with exactly one `-f`, so it ignores `COMPOSE_FILE`. Compose reads
    The last line must be `backup: OK <stamp>`, the three files must be on the
    SFTP server, and the monitor must show a success.
 
-If a required variable is missing, the `backup` container stops at start with
-`backup: ERROR: <NAME> is not set` and restarts in a loop. The container needs
-free disk space for one encrypted backup set (it is written to `/tmp` first).
+If `BACKUP_DBS` is set and another required variable is missing, the `backup`
+container stops at start with `backup: ERROR: <NAME> is not set` and restarts
+in a loop. `BACKUP_PING_URL` is optional; without it the log shows a warning.
+The container needs free disk space for one encrypted backup set (it is
+written to `/tmp` first).
 
 ### What is NOT in the backup
 

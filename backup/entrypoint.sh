@@ -1,6 +1,6 @@
 #!/bin/sh
 # cron (default): run backup.sh on BACKUP_SCHEDULE.  backup: run it once now.
-# restore <source_db> <stamp|latest> <target_db>: see restore.sh.
+# restore <source_db> <stamp|latest> <target_db|--zip-only>: see restore.sh.
 set -eu
 case "${1:-cron}" in
     cron)

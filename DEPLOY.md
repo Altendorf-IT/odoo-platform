@@ -669,15 +669,22 @@ since it now carries the key alongside `db_password` and `admin_passwd`.
 The `backup` service is a small container beside `db` and `odoo`. It does not
 need Odoo. Each night it does this for every database in `BACKUP_DBS`:
 
-1. `pg_dump` in custom format, then a `tar.gz` of the filestore.
-2. Both are encrypted with [`age`](https://age-encryption.org) and your
-   **public** key before they leave the container. The server holds no key
+1. Make one Odoo backup zip, in the same format as the **Backup** button of
+   the Odoo database manager (`/web/database/manager`): `dump.sql` (plain SQL,
+   `pg_dump --no-owner`), `filestore/` (the filestore of the database) and
+   `manifest.json` (Odoo series, Postgres version, installed modules).
+2. Encrypt the zip with [`age`](https://age-encryption.org) and your
+   **public** key before it leaves the container. The server holds no key
    that can decrypt a backup.
-3. Upload by SFTP: `<db>_<UTC stamp>.dump.age`,
-   `<db>_<UTC stamp>.filestore.tar.gz.age`, and last `<db>_<UTC stamp>.sha256`.
-   A backup without its `.sha256` file is not complete.
+3. Upload by SFTP as `<db>_<UTC stamp>.zip.age.part`, then rename it to
+   `<db>_<UTC stamp>.zip.age`. One file per database and run. A `.part` file
+   is an upload that did not finish; it is not a backup. age authenticates
+   the file: a damaged or cut file does not decrypt, so there is no checksum
+   file.
 4. Only when all uploads worked: delete the remote files of these databases
-   that are older than `BACKUP_KEEP_DAYS`.
+   that are older than `BACKUP_KEEP_DAYS` (this includes the 3-file sets
+   `.dump.age`, `.filestore.tar.gz.age`, `.sha256` of the format before
+   October 2026), and `.part` files older than one day.
 5. Tell the monitor: `BACKUP_PING_URL/start` at the start, `BACKUP_PING_URL` on
    success, `BACKUP_PING_URL/fail` on failure. The exit code is not 0 on failure
    and the container log names the failed step.
@@ -745,14 +752,16 @@ with exactly one `-f`, so it ignores `COMPOSE_FILE`, and it does not apply
    docker exec <project>-backup-1 backup.sh    # on the host; <project> = Dokploy app name
    ```
 
-   The last line must be `backup: OK <stamp>`, the three files must be on the
-   SFTP server, and the monitor must show a success.
+   The last line must be `backup: OK <stamp>`, the file
+   `<db>_<stamp>.zip.age` must be on the SFTP server, and the monitor must
+   show a success.
 
 If `BACKUP_DBS` is set and another required variable is missing, the `backup`
 container stops at start with `backup: ERROR: <NAME> is not set` and restarts
 in a loop. `BACKUP_PING_URL` is optional; without it the log shows a warning.
-The container needs free disk space for one encrypted backup set (it is
-written to `/tmp` first).
+The container needs free disk space in `/tmp` for about two copies of the
+zip: the plain `dump.sql` and the zip, then the zip and its encrypted copy.
+The files of one database are deleted before the next database starts.
 
 ### What is NOT in the backup
 
@@ -779,7 +788,7 @@ service first.
    `.env`. Start only the database: `docker compose up -d db`.
 2. Write the private key from the password manager to a file, for example
    `~/age-key.txt` (`chmod 600`).
-3. Restore. `latest` is the newest complete backup; a stamp such as
+3. Restore. `latest` is the newest backup; a stamp such as
    `20261024T023000Z` selects one backup:
 
    ```bash
@@ -787,10 +796,25 @@ service first.
      backup-restore <source_db> latest <target_db>
    ```
 
-   The script downloads the three files, checks the SHA-256 sums, decrypts,
-   makes the database `<target_db>`, runs `pg_restore`, and unpacks the
+   The script downloads `<source_db>_<stamp>.zip.age`, decrypts it (a wrong
+   key or a damaged file stops here), makes the database `<target_db>` (UTF8,
+   collation C, as Odoo does), loads `dump.sql` with `psql`, and unpacks the
    filestore to `/var/lib/odoo/filestore/<target_db>`. It never overwrites: it
    stops if the database or the filestore directory exists.
+
+   **Or restore in the Odoo database manager.** Decrypt the backup to a
+   normal Odoo backup zip, then use **Restore Database** at
+   `/web/database/manager` (master password; for a test copy tick
+   **This database is a copy** and **Neutralize**):
+
+   ```bash
+   docker compose run --rm -T -v ~/age-key.txt:/age-key.txt:ro \
+     backup-restore <source_db> latest --zip-only > backup.zip
+   ```
+
+   `-T` is necessary: the zip goes to stdout. Without Docker, the same with
+   `age` only: download the `.zip.age` file by SFTP, then
+   `age -d -i ~/age-key.txt -o backup.zip <file>.zip.age`.
 4. Delete `~/age-key.txt`.
 5. **Test copy:** neutralize it before Odoo starts on it (the product's
    `tools/neutralize_db.sql`). **Real recovery:** do not neutralize; set the
@@ -807,10 +831,14 @@ platform/scripts/test-backup-restore.sh
 ```
 
 It needs only Docker. It starts a throwaway Postgres, SFTP server and ping
-receiver, then checks: backup, retention, the failure ping, a restore with a
-wrong key, a restore with the right key (table checksum and file checksums
-equal), and that a second restore does not overwrite. Run it after each change
-in `platform/backup/`.
+receiver, makes an Odoo database with `ODOO_IMAGE` (default `odoo:19.0`; give
+the product image to skip the pull), then checks: the backup (one `.zip.age`
+file), retention (old files, old 3-file sets, stale `.part` files), the
+failure ping, `--zip-only` (zip contents, `manifest.json`, and a restore with
+Odoo's own `restore_db()`, the code behind the database manager's Restore), a
+restore with a wrong key, a restore with the right key (table checksum and
+file checksums equal), and that a second restore does not overwrite. Run it
+after each change in `platform/backup/`.
 
 ## Python requirements
 The image installs, at build time:

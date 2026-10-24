@@ -216,24 +216,17 @@ db_exists() {
         -tAc "SELECT 1 FROM pg_database WHERE datname='$1'" postgres 2>/dev/null | grep -q 1
 }
 
-# module_installed <db> <module> — cheap check, avoids a full odoo boot just to
-# find out whether the module is already there.
-module_installed() {
-    PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" \
-        -tAc "SELECT 1 FROM ir_module_module WHERE name='$2' AND state='installed'" \
-        "$1" 2>/dev/null | grep -q 1
-}
-
 # pin_lang_records <db> — flip noupdate on the res.lang external ids so a module
 # upgrade stops reverting them.
 #
 # WHY: Odoo's language defaults live in odoo/addons/base/data/res.lang.csv,
 # listed in base's `data` (not `demo`, and CSV files carry no noupdate flag), so
 # they are imported with noupdate=False. On every `-u base` — and `-u all`
-# includes base, as does module_auto_update's first pass and its -u all fallback
-# — the CSV is replayed and base.lang_en's date_format goes back to %m/%d/%Y,
-# silently undoing Settings > Translations > Languages. Nothing in the UI hints
-# at this, which is why it reads as a random redeploy gremlin.
+# includes base, as does UPGRADE_MODULES=auto on its first pass and after a
+# base image bump — the CSV is replayed and base.lang_en's date_format goes
+# back to %m/%d/%Y, silently undoing Settings > Translations > Languages.
+# Nothing in the UI hints at this, which is why it reads as a random redeploy
+# gremlin.
 #
 # THE FIX: models._load_records() skips a row when its external id is already
 # marked noupdate (`if not (update and d_noupdate)`), so setting noupdate on the
@@ -241,7 +234,7 @@ module_installed() {
 # Every other module's data keeps updating normally.
 #
 # Plain SQL on purpose: no registry load, so this cannot fail on a schema that
-# the upgrade below has not applied yet (see _mau_call for how that bites).
+# the upgrade below has not applied yet.
 # It is also idempotent — the WHERE clause matches nothing once pinned.
 #
 # TRADE-OFF: genuine upstream corrections to language data stop landing too.
@@ -263,44 +256,6 @@ pin_lang_records() {
     fi
 }
 
-# _mau_call <db> <method> — call an ir.module.module method with Odoo as a
-# library.
-#
-# Deliberately NOT `odoo shell`. The shell builds its session by calling
-# res.users.context_get() BEFORE it reads the piped-in script (odoo/cli/shell.py),
-# and that read prefetches every stored res.partner column in one query. So the
-# moment a module adds a new stored field to a core model, the shell dies on
-# "column ... does not exist" before it can run the upgrade that would ADD that
-# column — the schema fix needs the schema it is there to fix. That deadlock
-# shows up as a boot loop on the first deploy after the field lands.
-#
-# Library mode has no such bootstrap: loading the registry reads no business
-# data, so the upgrade always gets a chance to run.
-_mau_call() {
-    python3 - "$ODOO_RC" "$1" "$2" <<'PYEOF'
-import sys
-import threading
-
-import odoo
-from odoo.modules.registry import Registry
-
-conf, db, method = sys.argv[1], sys.argv[2], sys.argv[3]
-# setup_logging=True mirrors every odoo CLI command: it installs the log handler
-# (so the upgrade's own progress reaches the deploy log) and avoids the
-# PendingDeprecationWarning Odoo 18+ raises when the choice is left implicit.
-# parse_config also runs initialize_sys_path(), which is what puts addons_path
-# in place — without it the registry cannot find our modules at all.
-odoo.tools.config.parse_config(["-c", conf], setup_logging=True)
-# Only so log lines carry the db name instead of '?' (netsvc reads it off the
-# current thread); the registry below is addressed explicitly.
-threading.current_thread().dbname = db
-with Registry(db).cursor() as cr:
-    env = odoo.api.Environment(cr, odoo.SUPERUSER_ID, {})
-    getattr(env["ir.module.module"], method)()
-    cr.commit()
-PYEOF
-}
-
 # INIT_DB: one-shot fresh database creation (set once, then clear).
 if [ -n "$INIT_DB" ] && [ "$INIT_DB" != "False" ]; then
     IFS=',' read -ra _init_dbs <<< "$INIT_DB"
@@ -314,18 +269,16 @@ if [ -n "$INIT_DB" ] && [ "$INIT_DB" != "False" ]; then
             install_list="base"
             # 'auto'/'all' are upgrade *modes*, not module names — splicing them
             # into -i yields a dummy Odoo silently ignores, so a fresh db would
-            # come up with base only. Install the auto-update addon instead so
-            # the mode works from the first boot; name real modules in
-            # INSTALL_MODULES.
+            # come up with base only. Name real modules in INSTALL_MODULES.
             case "${UPGRADE_MODULES}" in
-                auto)  install_list="${install_list},module_auto_update" ;;
-                all|"") ;;
+                auto|all|"") ;;
                 *)     install_list="${install_list},${UPGRADE_MODULES}" ;;
             esac
             [ -n "${INSTALL_MODULES}" ] && install_list="${install_list},${INSTALL_MODULES}"
             odoo -c "$ODOO_RC" -d "$_db" -i "$install_list" --stop-after-init
-            # Library mode, not `odoo shell`, for the reason spelled out on
-            # _mau_call above. The password goes through the environment rather
+            # Library mode, not `odoo shell`: the shell reads res.users (and
+            # with it every stored res.partner column) before it runs the
+            # piped-in script. The password goes through the environment rather
             # than argv so it does not show up in `ps`.
             ODOO_ADMIN_PASSWORD="$ODOO_ADMIN_PASSWORD" \
                 python3 - "$ODOO_RC" "$_db" <<'PYEOF'
@@ -437,50 +390,26 @@ if [ -n "$UPGRADE_DB" ] && [ "$UPGRADE_DB" != "False" ]; then
             odoo -c "$ODOO_RC" -d "$_db" -i "${INSTALL_MODULES}" --stop-after-init
         fi
         if [ "${UPGRADE_MODULES}" = "auto" ]; then
-            # Checksum-based: OCA module_auto_update hashes every installed
-            # addon dir and upgrades ONLY the ones whose files changed. When
-            # nothing changed it is a no-op, so restarts cost seconds instead
-            # of a full `-u all` pass.
-            if ! module_installed "$_db" module_auto_update; then
-                echo "[entrypoint] installing module_auto_update (db=${_db})"
-                odoo -c "$ODOO_RC" -d "$_db" -i module_auto_update --stop-after-init
-                # `odoo -i` exits 0 for a module that is not on addons_path — it
-                # only logs "invalid module names, ignored". Without this check
-                # the install is silently retried every boot and `auto` mode
-                # never upgrades anything, which shows up much later as a stale
-                # column ("column x does not exist") in a restart loop.
-                if ! module_installed "$_db" module_auto_update; then
-                    echo "[entrypoint] ERROR: module_auto_update is not installed after -i" >&2
-                    echo "[entrypoint]        (db=${_db}). It is almost certainly not on" >&2
-                    echo "[entrypoint]        addons_path: add it to selection.txt and run" >&2
-                    echo "[entrypoint]        'make selection'. UPGRADE_MODULES=auto cannot" >&2
-                    echo "[entrypoint]        work without it — use an explicit module list" >&2
-                    echo "[entrypoint]        (or 'all') meanwhile." >&2
-                    exit 1
-                fi
-            fi
-            # NOTE: the first run after install upgrades everything (no saved
-            # hashes yet) — by design, it errs toward safety. Later runs are cheap.
+            # Checksum-based: click-odoo-update hashes every installed addon dir
+            # and upgrades ONLY the ones whose files changed. The hashes live in
+            # ir.config_parameter under the key OCA module_auto_update used, so
+            # a database that ran that addon carries straight over.
             #
-            # upgrade_changed_checksum() -> base.module.upgrade.upgrade_module()
-            # -> Registry.new(update_module=True), committing at each step. It
-            # saves the new hashes ONLY after the upgrade succeeds, so a failure
-            # here is always retried on the next boot — never silently skipped.
-            echo "[entrypoint] checksum upgrade (db=${_db})"
-            if ! _mau_call "$_db" upgrade_changed_checksum; then
-                # Correctness must not depend on the cheap path. `-u all` syncs
-                # every module's schema during registry load (update_module=True),
-                # before a single row is read, so it cannot deadlock the way a
-                # data read can. It is slow, but it only ever runs when the cheap
-                # path has ALREADY failed — never on a normal boot.
-                echo "[entrypoint] WARNING: checksum upgrade failed (db=${_db}) —" >&2
-                echo "[entrypoint]          falling back to a full 'odoo -u all'." >&2
-                odoo -c "$ODOO_RC" -d "$_db" -u all --stop-after-init
-                # Re-save hashes so the next boot is back on the cheap path.
-                _mau_call "$_db" _save_installed_checksums
-            fi
-            # `set -e` still aborts the boot if the fallback itself fails, rather
+            # It finds the changed set with plain SQL, then runs the same
+            # registry load as `odoo -u <those>` — nothing reads through the
+            # ORM before the schema is synced. When nothing changed it upgrades
+            # nothing, so restarts cost seconds.
+            #
+            # NOTE: the first run on a db with no saved hashes upgrades
+            # everything — by design, it errs toward safety. Later runs are cheap.
+            #
+            # There is no `-u all` fallback. An upgrade that fails for the
+            # changed modules fails the same way under `-u all`, only minutes
+            # later. Hashes are saved ONLY after success, so a failure is
+            # retried on the next boot, and `set -e` aborts this one rather
             # than serving a half-upgraded database.
+            echo "[entrypoint] checksum upgrade (db=${_db})"
+            click-odoo-update -c "$ODOO_RC" -d "$_db"
         elif [ -n "${UPGRADE_MODULES}" ]; then
             echo "[entrypoint] odoo -u ${UPGRADE_MODULES} (db=${_db})"
             odoo -c "$ODOO_RC" -d "$_db" -u "${UPGRADE_MODULES}" --stop-after-init

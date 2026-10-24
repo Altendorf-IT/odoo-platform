@@ -237,18 +237,24 @@ services:
     #
     # start_period must outlast the entrypoint's boot upgrade — failures inside
     # it are not counted, so an upgrade in progress never flaps the container.
-    # The `-u all` fallback path can exceed even 5 minutes on a large database;
-    # if that is normal for a deployment, raise HEALTHCHECK_START_PERIOD rather
-    # than lowering it. An OPENUPGRADE boot runs two full `-u all` passes: set
-    # HEALTHCHECK_START_PERIOD=900s (or more) for that deploy. Docker's
-    # `timeout` must stay above HEALTHCHECK_TIMEOUT
-    # (the script's own HTTP timeout) or the script is killed before it answers.
+    # A full upgrade (first `auto` run, base image bump) can exceed even 5
+    # minutes on a large database; if that is normal for a deployment, raise
+    # HEALTHCHECK_START_PERIOD rather than lowering it. Docker's `timeout` must
+    # stay above HEALTHCHECK_TIMEOUT (the script's own HTTP timeout) or the
+    # script is killed before it answers. An OPENUPGRADE boot runs two full
+    # `-u all` passes: set HEALTHCHECK_START_PERIOD=900s (or more) for that deploy.
+    #
+    # start_interval is the probe cadence INSIDE start_period. Traefik routes
+    # nothing to a container that is still `starting`, so without it a server
+    # that is already up waits out the rest of a 30s interval before it gets
+    # traffic. Needs Docker Engine 25+.
     healthcheck:
       test: ["CMD", "python3", "/usr/local/bin/odoo-healthcheck.py"]
       interval: ${HEALTHCHECK_INTERVAL:-30s}
       timeout: 15s
       retries: ${HEALTHCHECK_RETRIES:-3}
       start_period: ${HEALTHCHECK_START_PERIOD:-300s}
+      start_interval: ${HEALTHCHECK_START_INTERVAL:-5s}
     # No `ports:` on purpose — behind Traefik/nginx the proxy reaches odoo over
     # the docker network. For an inner-VPN box with no proxy, opt in via
     # docker-compose.dangerously-expose-odoo.yml (see DEPLOY.md). A `ports:`

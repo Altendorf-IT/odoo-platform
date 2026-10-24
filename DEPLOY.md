@@ -430,41 +430,47 @@ The entrypoint manages databases via two env vars:
 | `all` | force-upgrade every installed module | full, **every** boot |
 | empty | skip upgrades entirely | none |
 
-**`auto`** uses OCA `module_auto_update` (vendored in `oca_server_tools`, must be
-in `selection.txt`). It sha1-hashes every installed addon directory, stores the
-hashes in `ir.config_parameter`, and upgrades only those that differ — then
-saves new hashes *after* a successful run, so a failed upgrade retries rather
-than being silently skipped. Odoo cascades an upgrade to dependent modules, and
-vendor submodule bumps change file hashes, so both are caught automatically.
+**`auto`** runs `click-odoo-update` (from `click-odoo-contrib`, installed in the
+image). It sha1-hashes every installed addon directory, stores the hashes in
+`ir.config_parameter`, and upgrades only those that differ — then saves new
+hashes *after* a successful run, so a failed upgrade retries rather than being
+silently skipped. Odoo cascades an upgrade to dependent modules, and vendor
+submodule bumps change file hashes, so both are caught automatically.
 
-The entrypoint installs `module_auto_update` on first use (a cheap SQL check
-avoids booting Odoo just to find out), then runs, with Odoo imported as a
-library:
-
-```python
-env['ir.module.module'].upgrade_changed_checksum()
+```bash
+click-odoo-update -c "$ODOO_RC" -d <db>
 ```
 
-This deliberately does **not** go through `odoo shell`. The shell builds its
-session by calling `res.users.context_get()` *before* it reads the piped-in
-script, and that read prefetches every stored `res.partner` column. So the first
-boot after a module adds a stored field to a core model, the shell would die on
-`column ... does not exist` before it could run the upgrade that adds that very
-column — a boot loop where the schema fix needs the schema it is there to fix.
-Loading the registry as a library reads no business data, so the upgrade always
-gets to run.
+It finds the changed modules with plain SQL and then runs the same registry
+load as `odoo -u <changed modules>`. Nothing reads through the ORM before the
+schema is synced, so a module that adds a stored field to a core model cannot
+hit `column ... does not exist` on the way to the upgrade that adds that very
+column. When nothing changed it upgrades nothing and only opens the database
+once (about two seconds on a 149-module database).
 
-If the checksum upgrade fails anyway, the entrypoint falls back to a full
-`odoo -u all --stop-after-init`, then re-saves the hashes so the next boot is
-cheap again. `-u all` syncs every schema during registry load, before a row is
-read, so it cannot deadlock the same way. It is slow, but it only runs when the
-cheap path has already failed — never on a normal boot. If the fallback fails
-too, the boot aborts rather than serving a half-upgraded database.
+The hashes are stored under the key OCA `module_auto_update` used
+(`module_auto_update.installed_checksums`), so a database that ran on that
+addon carries over without a full upgrade. `auto` no longer needs the addon.
 
-> First run after enabling `auto` upgrades **everything** — there are no saved
-> hashes yet, and the module deliberately errs toward safety. Subsequent boots
-> are cheap. (`_save_installed_checksums()` can seed hashes without upgrading,
+There is **no `-u all` fallback**. If the upgrade of the changed modules fails,
+the boot aborts rather than serving a half-upgraded database, and the next boot
+retries. An upgrade that fails for the changed modules fails the same way under
+`-u all`, only minutes later — see the decision record
+`2026-10-02-auto-upgrade-click-odoo-update` in the product repo.
+
+> First run on a database with no saved hashes upgrades **everything** — the
+> tool deliberately errs toward safety. Subsequent boots are cheap.
+> (`click-odoo-update --only-compute-hashes` can seed hashes without upgrading,
 > but only when you are certain disk and DB are already in sync.)
+
+> **A base image change upgrades most of the database.** When `ODOO_IMAGE`
+> moves to a newer build of `odoo:19.0`, the hashes of the core addons change
+> and the next boot upgrades them all — minutes, not seconds. Pin `ODOO_IMAGE`
+> by digest (see *Reproducible builds*) so that happens only when you choose.
+
+> A module that is **new on disk** shows up in Apps only after a boot that
+> upgraded something, because Odoo refreshes its module list during an upgrade.
+> Otherwise name it in `INSTALL_MODULES`, or use Apps → Update Apps List.
 
 **`all`** has two sharp edges, both hit in practice: it costs the full upgrade
 on *every* restart (there is no change detection — `load_data` re-runs for every
@@ -472,9 +478,8 @@ module regardless), and it dependency-checks every installed module, so a single
 unmet python dep anywhere — including in a legacy module you no longer use —
 raises `UserError` and blocks startup entirely.
 
-`auto` and `all` are *modes*, not module names. The `INIT_DB` path handles this:
-`auto` installs `module_auto_update` on the fresh db, `all` is dropped. Name real
-modules in `INSTALL_MODULES` — splicing a mode into `-i` yields a dummy that Odoo
+`auto` and `all` are *modes*, not module names. The `INIT_DB` path drops both
+from the install list. Name real modules in `INSTALL_MODULES` — splicing a mode into `-i` yields a dummy that Odoo
 silently ignores, leaving a fresh db with `base` only.
 
 Examples:
@@ -493,8 +498,8 @@ INIT_DB=NewClient                # create a fresh db (one-shot, then clear)
 Odoo ships its language defaults in `odoo/addons/base/data/res.lang.csv`, listed
 in `base`'s `data`. CSV data files carry no `noupdate` flag, so they import with
 `noupdate=False` and are **replayed on every `base` upgrade**. Since `-u all`
-includes `base` — as does `module_auto_update`'s first pass and its `-u all`
-fallback — a redeploy silently resets Settings → Translations → Languages:
+includes `base` — as does `auto` on its first pass and after a base image
+change — a redeploy silently resets Settings → Translations → Languages:
 
 ```
 date_format   %d.%m.%Y  ->  %m/%d/%Y
@@ -598,6 +603,7 @@ Logic lives in `platform/docker/healthcheck.py` (uses `python3`; the image has n
 | var | default | notes |
 |---|---|---|
 | `HEALTHCHECK_START_PERIOD` | `300s` | must outlast the boot upgrade; failures inside it don't count |
+| `HEALTHCHECK_START_INTERVAL` | `5s` | probe cadence inside the start period — Traefik sends no traffic until the first pass; needs Docker Engine 25+ |
 | `HEALTHCHECK_INTERVAL` | `30s` | |
 | `HEALTHCHECK_RETRIES` | `3` | |
 | `HEALTHCHECK_TIMEOUT` | `10` | seconds, script-side; keep below compose's `timeout: 15s` |

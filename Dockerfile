@@ -140,6 +140,11 @@ RUN set -eux; \
         test -d /opt/openupgrade/openupgrade_scripts/scripts; \
     fi
 
+# click-odoo-update is what UPGRADE_MODULES=auto runs (see docker/entrypoint.sh).
+# Odoo 19 needs >=1.24. Its own layer, so it never re-runs the installs above.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --break-system-packages "click-odoo-contrib>=1.24"
+
 # Now copy the src tree for runtime.
 # Modifying your code will only hit this layer and below!
 #

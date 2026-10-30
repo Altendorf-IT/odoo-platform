@@ -7,6 +7,22 @@
 # reproducibility via ODOO_IMAGE (tag or, better, a sha256 digest) in .env.
 #
 ARG ODOO_IMAGE=odoo:19.0
+
+# Build selected addon frontends from their pinned sources. Only selected
+# addons with this hook run a build; Node and dependencies stay in this stage.
+FROM node:22-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS addon_frontends
+WORKDIR /build
+COPY src ./src
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    set -eu; \
+    corepack enable; \
+    for addon in src/custom_addons/* src/third_party_addons/_selected/*; do \
+        if [ -f "$addon/build-frontend.sh" ]; then \
+            (cd "$(readlink -f "$addon")" && sh ./build-frontend.sh); \
+        fi; \
+    done; \
+    find src -type d -name node_modules -prune -exec rm -rf '{}' +
+
 FROM ${ODOO_IMAGE}
 
 USER root
@@ -154,7 +170,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # every redeploy — code changes never reach runtime. /opt/extra-addons is a plain
 # image path, so the built code is always what runs. Keep addons off any VOLUME
 # path (ADDONS_PATH in the entrypoint points here too).
-COPY src /opt/extra-addons
+COPY --from=addon_frontends /build/src /opt/extra-addons
 
 # Guard: fail the build LOUDLY if git submodules weren't checked out (or the
 # build context dropped them, e.g. `git archive`). Every _selected entry is a

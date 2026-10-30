@@ -409,6 +409,12 @@ deliberately with `make submodules && git add src/third_party_addons/_vendor`.
 
 ## How module automation works
 
+### Addon frontend builds
+
+Selected and custom addons may include `build-frontend.sh`. The image runs this script from the resolved addon directory in a separate Node 22 build stage, before copying addon files into the Odoo image. The script must build assets inside its addon directory using locked dependencies. Node and `node_modules` stay out of the runtime image. A failed frontend build fails deployment. Without a hook, an addon's files pass through unchanged.
+
+This supports a submodule of an application's normal development branch with a selection such as `_vendor/hustlers_hub/odoo-addons/hustlers_hub`. The submodule commit pins both the addon and its shared frontend sources; no compiled release branch is required.
+
 The entrypoint manages databases via two env vars:
 
 - **`INIT_DB`** — one-shot fresh database creation. Comma-separated list of db

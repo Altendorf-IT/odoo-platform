@@ -115,6 +115,25 @@ fi
 : "${UPGRADE_DB:=}"
 : "${INIT_DB:=}"
 
+# Products may require modules in Git, without changing deployment secrets.
+# One technical module name per line; comments and blank lines are allowed.
+if [ -f /opt/extra-addons/custom_addons/required-modules.txt ]; then
+    while IFS= read -r _module || [ -n "$_module" ]; do
+        _module="${_module%%#*}"
+        _module="$(echo "$_module" | xargs)"
+        case "$_module" in
+            "") continue ;;
+            *[!a-zA-Z0-9_]*)
+                echo "[entrypoint] invalid required module name: $_module" >&2
+                exit 1 ;;
+        esac
+        case ",${INSTALL_MODULES}," in
+            *,"$_module",*) ;;
+            *) INSTALL_MODULES="${INSTALL_MODULES:+${INSTALL_MODULES},}${_module}" ;;
+        esac
+    done < /opt/extra-addons/custom_addons/required-modules.txt
+fi
+
 # Keep UI edits to Languages (date format, separators, week start) across
 # upgrades. Odoo ships those defaults in base/data/res.lang.csv, a plain data
 # file with no noupdate flag, so every `-u base` — and `-u all` includes base —

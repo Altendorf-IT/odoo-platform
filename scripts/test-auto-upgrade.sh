@@ -34,6 +34,7 @@ psql_() { docker exec "$PFX-pg" psql -U odoo -d "$DB" -Atc "$1"; }
 
 # probe <version> <extra python line> [<data file>]: write the probe addon.
 ADDON=$TMP/platform_upgrade_probe
+touch "$TMP/required-modules.txt"
 probe() {
     local data=""
     [ -z "${3:-}" ] || data="\"$3\""
@@ -60,18 +61,29 @@ boot() {
     local log=$1; shift
     local envs=()
     for e in "$@"; do envs+=(-e "$e"); done
+    local mounts=()
+    if [ -f "$TMP/required-modules.txt" ]; then
+        mounts+=(-v "$TMP/required-modules.txt:/opt/extra-addons/custom_addons/required-modules.txt:ro")
+    fi
     docker run --rm --network "$PFX-net" -e DB_HOST="$PFX-pg" -e DB_NAME="$DB" \
         -e WORKERS=0 -e MAX_CRON_THREADS=0 -e UPGRADE_MODULES=auto "${envs[@]}" \
         -v "$ADDON:/opt/extra-addons/custom_addons/platform_upgrade_probe:ro" \
+        "${mounts[@]}" \
         -v "$HERE/docker/entrypoint.sh:/tmp/entrypoint.sh:ro" \
         --entrypoint /bin/bash "$IMAGE" /tmp/entrypoint.sh --stop-after-init > "$log" 2>&1
 }
 
-echo "--- 0. new database with the probe v1, first auto boot"
+echo "--- 0. existing database installs a repo-required probe on first auto boot"
 probe 1.0.0 ""
-boot "$TMP/init.log" INIT_DB="$DB" INSTALL_MODULES=platform_upgrade_probe || fail "INIT_DB boot: see log"
-boot "$TMP/first.log" UPGRADE_DB="$DB" || { tail -30 "$TMP/first.log"; fail "first auto boot exited non-zero"; }
-ok "database made, first auto boot saved the hashes"
+boot "$TMP/init.log" INIT_DB="$DB" INSTALL_MODULES=base || fail "INIT_DB boot: see log"
+printf '# Required by this product\n\nplatform_upgrade_probe\nplatform_upgrade_probe' > "$TMP/required-modules.txt"
+boot "$TMP/first.log" UPGRADE_DB="$DB" INSTALL_MODULES=base || { tail -30 "$TMP/first.log"; fail "first auto boot exited non-zero"; }
+grep -Fq 'odoo -i base,platform_upgrade_probe (db=probe)' "$TMP/first.log" || fail "required list did not merge and deduplicate"
+[ "$(psql_ "SELECT state FROM ir_module_module WHERE name = 'platform_upgrade_probe'")" = installed ] \
+    || fail "repo-required probe was not installed"
+# An absent product file must retain the existing upgrade behavior.
+rm "$TMP/required-modules.txt"
+ok "repo-required module installed without an Apps refresh; environment install list preserved"
 
 echo "--- 1. probe v2 adds a stored field to res.company"
 probe 1.0.1 "upgrade_probe_b = fields.Char()"

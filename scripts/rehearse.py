@@ -44,7 +44,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -619,13 +618,18 @@ def refresh_template(cfg, repos, pg, base, from_db, from_backup):
     pg.drop(new)
     if from_backup:
         say(f"restore {from_backup} -> {new}")
-        with tempfile.TemporaryDirectory() as tmp:
-            run(["unzip", "-q", "-o", from_backup, "dump.sql", "-d", tmp])
-            pg.sql(f'CREATE DATABASE "{new}" OWNER "{pg.user}"')
-            with open(Path(tmp) / "dump.sql") as fh:
-                subprocess.run(["docker", "exec", "-i", pg.container, "psql", "-U", pg.user,
-                                "-X", "-q", "-d", new], stdin=fh, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL)
+        # As platform/backup/restore.sh and Odoo's restore_db(): an empty UTF8
+        # database with C collation, dump.sql in one transaction, stop on error.
+        pg.sql(f'CREATE DATABASE "{new}" OWNER "{pg.user}" TEMPLATE template0 '
+               "ENCODING 'UTF8' LC_COLLATE 'C'")
+        dump = subprocess.Popen(["unzip", "-p", from_backup, "dump.sql"], stdout=subprocess.PIPE)
+        rc = subprocess.run(["docker", "exec", "-i", pg.container, "psql", "-U", pg.user, "-X",
+                             "-q", "-v", "ON_ERROR_STOP=1", "--single-transaction", "-d", new],
+                            stdin=dump.stdout, stdout=subprocess.DEVNULL).returncode
+        dump.stdout.close()
+        if dump.wait() or rc:
+            pg.drop(new)
+            die(f"restore of dump.sql from {from_backup} failed; {tpl} left as it was")
         source = Path(from_backup).name
     else:
         say(f"copy {from_db} -> {new} (the source stays untouched)")

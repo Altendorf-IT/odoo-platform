@@ -261,7 +261,8 @@ CPUs). `--clean` empties it.
 The template database `reh_template` is a neutralized prod-state copy at the
 prod ref, marked `IS_TEMPLATE`, with a comment that names its ref, core and
 source. `--refresh-base` rebuilds the base image and, with `--from-db` or
-`--from-backup` (an Odoo backup zip; decrypt an `.age` file first), makes a
+`--from-backup` (an Odoo backup zip; decrypt the nightly `.age` file first, DEPLOY.md
+"Restore runbook", `--zip-only`), makes a
 new template: copy, product `NEUTRALIZE_SQL` + verify, admin password
 `rehearse-admin`, `odoo neutralize`, prod entrypoint upgrade, neutralize +
 verify again, asset bundles dropped (the template has no filestore). The old

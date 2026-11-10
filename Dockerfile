@@ -8,11 +8,19 @@
 #
 ARG ODOO_IMAGE=odoo:19.0
 
+# The addons tree as the image ships it: src/ after Dockerfile.dockerignore,
+# before the frontend build. A stage of its own so a light rehearsal can export
+# exactly this tree without building anything:
+#   docker build --target addons_tree --output type=local,dest=DIR
+# (see scripts/rehearse.py).
+FROM scratch AS addons_tree
+COPY src /src
+
 # Build selected addon frontends from their pinned sources. Only selected
 # addons with this hook run a build; Node and dependencies stay in this stage.
 FROM node:22-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS addon_frontends
 WORKDIR /build
-COPY src ./src
+COPY --from=addons_tree /src ./src
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     set -eu; \
     corepack enable; \

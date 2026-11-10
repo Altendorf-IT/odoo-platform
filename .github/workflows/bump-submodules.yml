@@ -18,15 +18,25 @@
 #   jobs:
 #     bump:
 #       uses: <owner>/odoo-platform/.github/workflows/bump-submodules.yml@19.0
+#       with:
+#         app_id: ${{ vars.SUBMODULE_BUMP_APP_ID }}
 #       secrets:
-#         BUMP_TOKEN: ${{ secrets.SUBMODULE_BUMP_PAT }}
+#         APP_PRIVATE_KEY: ${{ secrets.SUBMODULE_BUMP_APP_PRIVATE_KEY }}
 #
 # Optionally pass `with: { paths: "a b c" }` to watch only specific submodules.
 #
-# BUMP_TOKEN: fine-grained PAT with Contents read+write and Pull requests
-# read+write on the product repo, plus Contents read on any PRIVATE submodule
-# repo you want bumped. Public submodules (e.g. OCA) need no extra grant; a
-# private one the token can't read is simply skipped.
+# Auth (preferred): a GitHub App. The workflow mints a short-lived installation
+# token with actions/create-github-app-token, scoped to the whole owner
+# (organization) so it can also read private submodule repos. The App needs
+# repository permissions Contents read+write, Pull requests read+write
+# (Metadata read is implicit) and must be installed on the product repo and on
+# every PRIVATE submodule repo. Public submodules (e.g. OCA) need no grant; a
+# private one the App can't read is simply skipped. Bump commits are authored
+# by the App's bot (<slug>[bot]).
+#
+# Fallback (legacy): secret BUMP_TOKEN, a PAT with the same access. Used only
+# when no App key is passed. Org-owned repos can't use fine-grained PATs
+# across repos, which is why the App is preferred.
 name: Bump submodules
 
 on:
@@ -44,17 +54,68 @@ on:
         required: false
         type: string
         default: auto/bump-submodules
+      app_id:
+        description: >-
+          GitHub App ID (or client ID) for the bump App. Not secret; pass a
+          repo/org variable. Used together with the APP_PRIVATE_KEY secret.
+        required: false
+        type: string
+        default: ""
     secrets:
+      APP_PRIVATE_KEY:
+        description: Private key (PEM) of the bump GitHub App.
+        required: false
       BUMP_TOKEN:
-        required: true
+        description: Legacy PAT fallback, used only when no App key is passed.
+        required: false
 
 jobs:
   bump:
     runs-on: ubuntu-latest
+    env:
+      HAVE_APP: ${{ inputs.app_id != '' && secrets.APP_PRIVATE_KEY != '' }}
     steps:
+      - name: Mint GitHub App installation token
+        id: app
+        if: env.HAVE_APP == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ inputs.app_id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          # Whole owner, not just this repo: needed to read private submodules.
+          owner: ${{ github.repository_owner }}
+
+      - name: Pick token and commit identity
+        id: auth
+        env:
+          APP_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          LEGACY_TOKEN: ${{ secrets.BUMP_TOKEN }}
+        run: |
+          set -eu
+          if [ -n "${APP_TOKEN:-}" ]; then
+            token="$APP_TOKEN"
+            name="${APP_SLUG}[bot]"
+            id=$(GH_TOKEN="$token" gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)
+            email="${id}+${name}@users.noreply.github.com"
+          elif [ -n "${LEGACY_TOKEN:-}" ]; then
+            token="$LEGACY_TOKEN"
+            name="submodule-bump[bot]"
+            email="submodule-bump@users.noreply.github.com"
+          else
+            echo "::error::No credentials: pass app_id + APP_PRIVATE_KEY (preferred) or BUMP_TOKEN"
+            exit 1
+          fi
+          echo "::add-mask::$token"
+          {
+            echo "token=$token"
+            echo "name=$name"
+            echo "email=$email"
+          } >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v5
         with:
-          token: ${{ secrets.BUMP_TOKEN }}
+          token: ${{ steps.auth.outputs.token }}
           # persist-credentials (default true) stores the token for github.com,
           # so fetching private same-account submodules (relative URLs) works.
 
@@ -62,11 +123,13 @@ jobs:
         id: update
         env:
           PATHS_IN: ${{ inputs.paths }}
-          BUMP_TOKEN: ${{ secrets.BUMP_TOKEN }}
+          BUMP_TOKEN: ${{ steps.auth.outputs.token }}
+          GIT_NAME: ${{ steps.auth.outputs.name }}
+          GIT_EMAIL: ${{ steps.auth.outputs.email }}
         run: |
           set -eu
-          git config user.name "submodule-bump[bot]"
-          git config user.email "submodule-bump@users.noreply.github.com"
+          git config user.name "$GIT_NAME"
+          git config user.email "$GIT_EMAIL"
 
           # Authenticate EVERY github.com fetch, including submodule fetches.
           # The checkout action only stores the token on the superproject's
@@ -149,7 +212,7 @@ jobs:
       - name: Push bump branch and open/refresh PR
         if: steps.update.outputs.changed == 'true'
         env:
-          GH_TOKEN: ${{ secrets.BUMP_TOKEN }}
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
           BRANCH: ${{ inputs.pr_branch }}
           BASE: ${{ github.ref_name }}
           SUMMARY: ${{ steps.update.outputs.summary }}

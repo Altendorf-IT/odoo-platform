@@ -140,11 +140,19 @@ token can't reach, or a network blip) is skipped with a warning, not fatal.
 
 To activate it in a product repo:
 
-1. Add a repo secret **`SUBMODULE_BUMP_PAT`** — a fine-grained PAT with
-   *Contents: read+write* and *Pull requests: read+write* on the product repo,
-   plus *Contents: read* on any **private** submodule repos you want bumped.
-   Public submodules (OCA etc.) need no extra grant.
-2. Make sure the workflow file is on the repo's **default branch** — scheduled
+1. Use a **GitHub App** (a PAT can't span repos of an organization). Create
+   one in the org with repository permissions *Contents: read+write* and
+   *Pull requests: read+write* (Metadata: read is implicit), no webhook.
+   Install it on the product repo and on every **private** submodule repo.
+   Public submodules (OCA etc.) need no grant.
+2. Store the App ID as variable **`SUBMODULE_BUMP_APP_ID`** and the generated
+   private key (PEM) as secret **`SUBMODULE_BUMP_APP_PRIVATE_KEY`** — at org
+   level, so every product repo shares them. The caller passes them as
+   `with: app_id` and `secrets: APP_PRIVATE_KEY`. The workflow mints a
+   short-lived token with `actions/create-github-app-token` and authors the
+   bump commit as `<app-slug>[bot]`.
+   Legacy: a caller that passes only `secrets: BUMP_TOKEN` (a PAT) still works.
+3. Make sure the workflow file is on the repo's **default branch** — scheduled
    runs only fire from there. Use the *Run workflow* button (`workflow_dispatch`)
    to bump on demand from any branch.
 

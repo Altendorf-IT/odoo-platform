@@ -23,6 +23,30 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     done; \
     find src -type d -name node_modules -prune -exec rm -rf '{}' +
 
+# Python dependency inputs only: the vendor requirements.txt files and the
+# deps manifest-pydeps.py derives from manifests (see the install below),
+# collected in a stage of their own. The pip layer binds just this result, so
+# it is keyed on the dependency lists, not on the vendor code: a code or
+# version change in a vendored module (organize_urself, the Hub, an OCA bump
+# without new deps) no longer re-runs every pip install.
+FROM ${ODOO_IMAGE} AS pydeps
+USER root
+COPY src/third_party_addons/_vendor /tmp/src/third_party_addons/_vendor
+COPY src/third_party_addons/_static_vendor /tmp/src/third_party_addons/_static_vendor
+COPY platform/scripts/manifest-pydeps.py /tmp/manifest-pydeps.py
+RUN set -eu; \
+    mkdir -p /pydeps; \
+    cd /tmp/src; \
+    find third_party_addons/_vendor third_party_addons/_static_vendor \
+         -maxdepth 2 -name requirements.txt | LC_ALL=C sort > /pydeps/vendor-reqs.list; \
+    while read -r req; do \
+        mkdir -p "/pydeps/$(dirname "$req")"; \
+        cp "$req" "/pydeps/$req"; \
+    done < /pydeps/vendor-reqs.list; \
+    python3 /tmp/manifest-pydeps.py \
+        third_party_addons/_vendor third_party_addons/_static_vendor \
+        > /pydeps/manifest-reqs.txt
+
 FROM ${ODOO_IMAGE}
 
 USER root
@@ -64,13 +88,11 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1 \
 ARG INSTALL_VENDOR_REQS=1
 
 # --- CACHE & PATH OPTIMIZATION: TARGETED BIND MOUNTS ---
-# Bind ONLY the dependency sources (not the whole context) so editing our own
-# modules can't bust this layer. The pip install only re-runs when the root
-# requirements.txt or a vendor module changes.
+# Bind ONLY the dependency lists (the pydeps stage above, not the vendor code)
+# so editing modules can't bust this layer. The pip install only re-runs when
+# the root requirements.txt or a vendor dependency list changes.
 RUN --mount=type=bind,source=requirements.txt,target=/tmp/src/requirements.txt \
-    --mount=type=bind,source=src/third_party_addons/_vendor,target=/tmp/src/third_party_addons/_vendor \
-    --mount=type=bind,source=src/third_party_addons/_static_vendor,target=/tmp/src/third_party_addons/_static_vendor \
-    --mount=type=bind,source=platform/scripts/manifest-pydeps.py,target=/tmp/src/manifest-pydeps.py \
+    --mount=type=bind,from=pydeps,source=/pydeps,target=/tmp/pydeps \
     --mount=type=cache,target=/root/.cache/pip \
     set -eux; \
     # Debian-packaged dists have no RECORD file, so pip cannot UNINSTALL them:
@@ -92,14 +114,12 @@ RUN --mount=type=bind,source=requirements.txt,target=/tmp/src/requirements.txt \
         *) vendor_reqs=1 ;; \
     esac; \
     echo "[build] INSTALL_VENDOR_REQS='${INSTALL_VENDOR_REQS}' -> vendor requirements $([ "$vendor_reqs" = 1 ] && echo ON || echo OFF)"; \
-    if [ "$vendor_reqs" = "1" ] && [ -d /tmp/src/third_party_addons ]; then \
+    if [ "$vendor_reqs" = "1" ]; then \
         # Not `find -exec`: that swallows a failing pip (find's own exit
         # status is what `set -e` sees), so a dep could quietly not install.
-        find /tmp/src/third_party_addons/_vendor \
-             /tmp/src/third_party_addons/_static_vendor \
-             -maxdepth 2 -name requirements.txt > /tmp/vendor-reqs.list; \
         count=0; \
         while read -r req; do \
+            req="/tmp/pydeps/$req"; \
             echo "[build] pip install -r $req"; \
             # Retry once ignoring installed dists: the same Debian RECORD
             # problem can surface for any package the base image ships, and
@@ -111,18 +131,15 @@ RUN --mount=type=bind,source=requirements.txt,target=/tmp/src/requirements.txt \
                 pip install --break-system-packages --ignore-installed -r "$req"; \
             }; \
             count=$((count + 1)); \
-        done < /tmp/vendor-reqs.list; \
+        done < /tmp/pydeps/vendor-reqs.list; \
         echo "[build] $count vendor requirements file(s) installed"; \
         # Fallback: manifest external_dependencies for modules with no
         # requirements.txt anywhere between them and their vendor root.
         # Odoo 19 checks these names against installed dist metadata, so
         # pip-installing them verbatim is exactly what the check expects.
-        python3 /tmp/src/manifest-pydeps.py \
-             /tmp/src/third_party_addons/_vendor \
-             /tmp/src/third_party_addons/_static_vendor \
-             > /tmp/manifest-reqs.txt; \
-        if [ -s /tmp/manifest-reqs.txt ]; then \
-            pip install --break-system-packages -r /tmp/manifest-reqs.txt; \
+        # (collected by manifest-pydeps.py in the pydeps stage)
+        if [ -s /tmp/pydeps/manifest-reqs.txt ]; then \
+            pip install --break-system-packages -r /tmp/pydeps/manifest-reqs.txt; \
         fi; \
     fi; \
     if [ -f /tmp/src/requirements.txt ]; then \

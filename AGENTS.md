@@ -38,8 +38,9 @@ is pushed (push = prod release). Use the product's `tools/rehearse.sh`
 - `tools/rehearse.sh --detect` suggests the tier from the diff and prints
   why; an explicit `--tier` wins, but say why in the report when you go
   below the suggestion.
-- Always the prod core digest (set in `tools/rehearse.sh`), never a moving
-  `odoo:19.0` tag, never a hand-copied addons tree.
+- Always the prod core digest (the product's committed `odoo-core.env`, the
+  same line the prod build uses), never a moving `odoo:19.0` tag, never a
+  hand-copied addons tree. A core bump is a commit to `odoo-core.env`.
 - Bulk output (build contexts, prod-layout trees, `git archive` exports,
   test exports) goes to the cache dir outside the editor workspace
   (`REHEARSE_CACHE`, default `~/Library/Caches/<repo>-rehearse`), never into

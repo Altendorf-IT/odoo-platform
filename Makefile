@@ -5,7 +5,9 @@
 #   include platform/Makefile
 #
 # All targets run from the product root. `make help` for the list.
-COMPOSE ?= docker compose
+# A product with a committed core pin (odoo-core.env) loads it after .env, so
+# the pin wins, as in the deploy (DEPLOY.md "Reproducible builds").
+COMPOSE ?= docker compose$(if $(wildcard odoo-core.env), $(foreach f,$(wildcard .env) odoo-core.env,--env-file $(f)))
 # Dev stack = prod compose + the dev override (ports, live mount, reload).
 COMPOSE_DEV ?= $(COMPOSE) -f docker-compose.yml -f platform/docker-compose.override.yml
 SERVICE ?= odoo

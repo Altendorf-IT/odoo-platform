@@ -191,9 +191,11 @@ perspective.
 Push to the deploy branch is a prod release, so every change is rehearsed on
 a neutralized prod-state copy first. The rule is in [AGENTS.md](AGENTS.md);
 this is the how-to. A product calls the tool through a small wrapper
-(`tools/rehearse.sh`) that sets its configuration: the prod core digest
-(`REHEARSE_ODOO_IMAGE`), the Postgres container, the image name, the
-first-party submodules and their `--name DIR` aliases. All options:
+(`tools/rehearse.sh`) that sets its configuration: the Postgres container,
+the image name, the first-party submodules and their `--name DIR` aliases.
+The prod core digest comes from the product's committed `odoo-core.env`,
+the same line the prod build uses (DEPLOY.md "Reproducible builds";
+`REHEARSE_ODOO_IMAGE` overrides it, e.g. for a candidate core). All options:
 `tools/rehearse.sh --help`.
 
 ```bash
@@ -210,9 +212,9 @@ What one run does:
 
 1. **Tier.** Diff of the checkout (committed, staged, unstaged, untracked)
    and of each `--sub`/alias working tree against the prod ref
-   (`--base`, default `origin/19.0`). FULL for: requirements, Dockerfile or
-   `docker/`, `_selected`, a new module, `external_dependencies`,
-   migrations, a new model or a stored field added or changed (AST compare),
+   (`--base`, default `origin/19.0`). FULL for: `odoo-core.env`,
+   requirements, Dockerfile or `docker/`, `_selected`, a new module,
+   `external_dependencies`, migrations, a new model or a stored field added or changed (AST compare),
    a third-party submodule bump, frontend build inputs (files of a repo with
    a `build-frontend.sh` addon that are outside its addon directories).
    Everything else is LIGHT. `--tier` wins.

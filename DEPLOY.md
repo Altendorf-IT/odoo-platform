@@ -398,10 +398,40 @@ and set `DB_HOST` to the prod Postgres over a shared Dokploy network — **or**
 just let the test app run its own Postgres (~40MB, fully isolated, safer staging).
 
 ### Reproducible builds
-Pin the base image by digest in `.env`:
+Pin the Odoo core by digest **in git**: a file `odoo-core.env` at the product
+root, one line (comments allowed):
 ```
-ODOO_IMAGE=odoo@sha256:<digest>
+ODOO_IMAGE=odoo:19.0@sha256:<index digest>
 ```
+The value goes to the image build as the build arg `ODOO_IMAGE`
+(`docker-compose.yml` `build.args`, interpolated from the env files) and to
+`tools/rehearse.sh`. A core bump is then a normal commit: rehearse it
+(FULL, see README "Rehearsal before release"), commit the new line, push.
+Revert the commit to go back. The digest is the multi-arch index digest
+(`docker buildx imagetools inspect odoo:19.0`), so one value fits every host.
+
+How the value reaches the build:
+
+- Compose interpolates `ODOO_IMAGE` from the env files it is given. With
+  several `--env-file` options the **last file wins**; the shell environment
+  wins over all files. Without `--env-file` compose reads only `.env`.
+- The platform `Makefile` passes `--env-file .env --env-file odoo-core.env`
+  when the product has the file, so the pin wins over a local `.env`.
+- Dokploy runs `docker compose -p <app> --env-file .env -f <Compose Path> up -d
+  --build` with the `.env` it writes from its Environment tab. It does not
+  load `odoo-core.env` by itself. Add it in the app's custom deploy command
+  (`--env-file .env --env-file odoo-core.env`), then delete `ODOO_IMAGE`
+  from the Environment tab. Until then the Environment value is what the
+  build uses.
+- **Guard:** when `odoo-core.env` exists, `platform/Dockerfile` (stage
+  `core_pin`) fails the build if the build arg differs from the pin, for
+  example an old value left in the Dokploy Environment, or a deploy that
+  does not load the file. A failed build does not replace the running
+  container. The pin is written to `/etc/odoo-core-image` in the image.
+
+A product without `odoo-core.env` works as before: `ODOO_IMAGE` from `.env`
+(Dokploy Environment), default `odoo:19.0` (a moving tag; local builds only).
+
 Vendor module versions are pinned by the `_vendor` submodule commits. Bump them
 deliberately with `make submodules && git add src/third_party_addons/_vendor`.
 

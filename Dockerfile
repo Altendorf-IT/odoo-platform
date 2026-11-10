@@ -3,10 +3,32 @@
 # Authoritative deploy image for an Odoo 19 product repo that consumes this
 # platform as a submodule at ./platform. Build context = PRODUCT repo root
 # (see platform/docker-compose.yml).
-# Base = official Odoo 19 image (clean upstream == our checkout). Pin it for
-# reproducibility via ODOO_IMAGE (tag or, better, a sha256 digest) in .env.
+# Base = official Odoo 19 image (clean upstream == our checkout). Pin it by
+# digest in the product's committed `odoo-core.env` (ODOO_IMAGE=...@sha256:...;
+# see DEPLOY.md "Reproducible builds"), or via ODOO_IMAGE in .env.
 #
 ARG ODOO_IMAGE=odoo:19.0
+
+# Core pin guard. A product that commits `odoo-core.env` builds on exactly that
+# core: a build whose ODOO_IMAGE differs (an old value in the deploy
+# environment, an env file not loaded) fails here instead of shipping another
+# core. Without the file nothing is checked. The pin goes into the image.
+FROM ${ODOO_IMAGE} AS core_pin
+ARG ODOO_IMAGE
+USER root
+COPY odoo-core.en[v] /core/
+RUN set -eu; \
+    pin=; \
+    if [ -f /core/odoo-core.env ]; then \
+        pin=$(sed -n 's/^ODOO_IMAGE=//p' /core/odoo-core.env | tail -n 1); \
+    fi; \
+    if [ -n "$pin" ] && [ "$pin" != "$ODOO_IMAGE" ]; then \
+        echo "ERROR: ODOO_IMAGE is '$ODOO_IMAGE', odoo-core.env pins '$pin'." >&2; \
+        echo "       Load odoo-core.env after .env (--env-file .env --env-file odoo-core.env)" >&2; \
+        echo "       or set ODOO_IMAGE to the pin." >&2; \
+        exit 1; \
+    fi; \
+    mkdir -p /core; echo "$ODOO_IMAGE" > /core/image
 
 # The addons tree as the image ships it: src/ after Dockerfile.dockerignore,
 # before the frontend build. A stage of its own so a light rehearsal can export
@@ -58,6 +80,7 @@ RUN set -eu; \
 FROM ${ODOO_IMAGE}
 
 USER root
+COPY --from=core_pin /core/image /etc/odoo-core-image
 
 # Canonical's archive can be congested or blackholed from some hosting
 # providers (Jul 2026: from netcup, archive.ubuntu.com port 80 was dead and

@@ -369,8 +369,8 @@ def wanted(path):
 
 def stage_worktree(repos, dest):
     """Copy what `git add -A` would commit (product + submodules, overrides
-    applied) to dest: src/, requirements.txt and platform/, the paths
-    platform/Dockerfile reads. tar keeps mtimes, so BuildKit sends only what
+    applied) to dest: src/, requirements.txt, odoo-core.env and platform/,
+    the paths platform/Dockerfile reads. tar keeps mtimes, so BuildKit sends only what
     changed since the last run."""
     groups = []  # (repo dir, prefix, [paths])
 
@@ -381,7 +381,7 @@ def stage_worktree(repos, dest):
         paths = [line.split("\t", 1)[1] for line in tracked]
         paths += git_z(repo, "ls-files", "-z", "--others", "--exclude-standard")
         keep = [p for p in paths if p not in links
-                and (not top or wanted(p))
+                and (not top or wanted(p) or p == CORE_PIN)
                 and ((Path(repo) / p).is_symlink() or (Path(repo) / p).exists())]
         groups.append((Path(repo), prefix, keep))
         return links

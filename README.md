@@ -195,7 +195,8 @@ this is the how-to. A product calls the tool through a small wrapper
 the image name, the first-party submodules and their `--name DIR` aliases.
 The prod core digest comes from the product's committed `odoo-core.env`,
 the same line the prod build uses (DEPLOY.md "Reproducible builds";
-`REHEARSE_ODOO_IMAGE` overrides it, e.g. for a candidate core). All options:
+`REHEARSE_ODOO_IMAGE` overrides it, but a FULL build still checks the
+file). Rehearse a core bump by changing that line: the change is FULL. All options:
 `tools/rehearse.sh --help`.
 
 ```bash
@@ -224,7 +225,8 @@ What one run does:
    `custom_addons/required-modules.txt` of the mounted tree, as on prod
    (list it there), and `--modules` adds its tests. `--tier` wins.
 2. **Stage.** What `git add -A` would commit (tracked + untracked, not
-   ignored), for `src/`, `requirements.txt` and `platform/`, with the
+   ignored), for `src/`, `requirements.txt`, `odoo-core.env` and
+   `platform/`, with the
    overrides, is copied (tar, mtimes kept) to `ctx-run` in the cache dir.
 3. **LIGHT:** `docker build --target addons_tree --output type=local` of that
    context: BuildKit applies `Dockerfile.dockerignore` and the `COPY src`

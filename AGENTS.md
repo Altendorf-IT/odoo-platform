@@ -22,6 +22,33 @@ Every section applies to every response unless it says otherwise.
 - Controllers: `@route(type='jsonrpc')`, not `type='json'`. Domains:
   `odoo.fields.Domain`, not `odoo.osv.expression`.
 
+## Rehearsal before release — hard rule
+
+Every change is rehearsed locally on a neutralized prod-state copy before it
+is pushed (push = prod release). Use the product's `tools/rehearse.sh`
+(`platform/scripts/rehearse.py`; how-to in `platform/README.md`).
+
+- **LIGHT** (default): views, JS/CSS, texts and translations, non-stored
+  computed fields, python logic without a schema or data migration. No image
+  build: the code is mounted in the prod addons layout into the standing base
+  image. **Never build an image for a light change.**
+- **FULL**: new module, new python or system dependency, Dockerfile or
+  entrypoint change, stored field or data migration, vendor submodule bump,
+  core digest bump, frontend build input (e.g. the Hub Svelte bundle).
+- `tools/rehearse.sh --detect` suggests the tier from the diff and prints
+  why; an explicit `--tier` wins, but say why in the report when you go
+  below the suggestion.
+- Always the prod core digest (set in `tools/rehearse.sh`), never a moving
+  `odoo:19.0` tag, never a hand-copied addons tree.
+- Bulk output (build contexts, prod-layout trees, `git archive` exports,
+  test exports) goes to the cache dir outside the editor workspace
+  (`REHEARSE_CACHE`, default `~/Library/Caches/<repo>-rehearse`), never into
+  the repo tree, `.local/` or `src/.agent-exports/`: every burst of new files
+  in a workspace folder makes VS Code rescan and peg all CPUs.
+- Clean up after yourself: a run removes what it made unless `--keep`; after
+  `--keep`, run `tools/rehearse.sh --clean`. Touch only `reh-*` / `reh_*`
+  things; never `docker container prune` / `volume prune` / `system prune`.
+
 ## Decision records — mandatory practice
 
 Whenever a change alters *what the product does* — module selection, workflow

@@ -185,3 +185,81 @@ To activate it in a product repo:
 Deployment specifics (Dokploy, Traefik/nginx routing, backups): see
 [DEPLOY.md](DEPLOY.md) — paths there are written from the product-repo-root
 perspective.
+
+## Rehearsal before release (`scripts/rehearse.py`)
+
+Push to the deploy branch is a prod release, so every change is rehearsed on
+a neutralized prod-state copy first. The rule is in [AGENTS.md](AGENTS.md);
+this is the how-to. A product calls the tool through a small wrapper
+(`tools/rehearse.sh`) that sets its configuration: the prod core digest
+(`REHEARSE_ODOO_IMAGE`), the Postgres container, the image name, the
+first-party submodules and their `--name DIR` aliases. All options:
+`tools/rehearse.sh --help`.
+
+```bash
+tools/rehearse.sh --detect                     # suggested tier + reasons, nothing else
+tools/rehearse.sh --ou ../ou-feature \
+    --modules organize_uraccounting --smoke ./smoke.py   # LIGHT if the diff allows
+tools/rehearse.sh --tier full                  # force a full image build
+tools/rehearse.sh --keep                       # leave a server on 127.0.0.1:8199
+tools/rehearse.sh --clean                      # remove every reh-* leftover
+tools/rehearse.sh --refresh-base --from-db <neutralized db>    # or --from-backup <zip>
+```
+
+What one run does:
+
+1. **Tier.** Diff of the checkout (committed, staged, unstaged, untracked)
+   and of each `--sub`/alias working tree against the prod ref
+   (`--base`, default `origin/19.0`). FULL for: requirements, Dockerfile or
+   `docker/`, `_selected`, a new module, `external_dependencies`,
+   migrations, a new model or a stored field added or changed (AST compare),
+   a third-party submodule bump, frontend build inputs (files of a repo with
+   a `build-frontend.sh` addon that are outside its addon directories).
+   Everything else is LIGHT. `--tier` wins.
+2. **Stage.** What `git add -A` would commit (tracked + untracked, not
+   ignored), for `src/`, `requirements.txt` and `platform/`, with the
+   overrides, is copied (tar, mtimes kept) to `ctx-run` in the cache dir.
+3. **LIGHT:** `docker build --target addons_tree --output type=local` of that
+   context: BuildKit applies `Dockerfile.dockerignore` and the `COPY src`
+   itself, so the tree is the one the image would ship. Files a frontend
+   hook builds come from the base image. The tree is mounted read-only at
+   `/opt/extra-addons` of the base image
+   `<image>:reh-base-<key>`, where the key covers the core digest, the
+   Dockerfile, `docker/`, the pydeps scripts, every requirements file,
+   third-party submodule pins and the frontend inputs at the prod ref. A
+   changed key builds a new base image (a full build, once).
+   **FULL:** `docker build` of the same context with the prod core digest.
+4. **Database.** `CREATE DATABASE reh_<run> TEMPLATE reh_template` (a few
+   seconds), a fresh data volume.
+5. **Upgrade.** One container run of the prod entrypoint with
+   `UPGRADE_DB=<db> UPGRADE_MODULES=auto` (required modules, then
+   `click-odoo-update`), the same path a deploy takes.
+6. **Tests** (`--modules a,b`): the image strips `tests/`, so the run adds
+   only these modules' test directories, then `-u a,b --test-tags /a,/b`.
+7. **Smoke** (`--smoke <exe>`): a server on `127.0.0.1:$REHEARSE_PORT`; the
+   executable gets `REH_URL`, `REH_DB`, `REH_LOGIN`, `REH_PASSWORD`.
+8. **Cleanup.** Container, database, volume, run image and tree are removed;
+   logs stay in `runs/<run>/` of the cache dir until `--clean`. `--keep` leaves
+   everything up for manual testing.
+
+All bulk output (contexts, trees, logs) lives in `REHEARSE_CACHE` (default
+`~/Library/Caches/<repo>-rehearse`, `~/.cache/...` on Linux), outside the
+editor workspace. Never point it into the repo tree: an editor that watches
+the workspace rescans every new file (on 10 Nov 2026 VS Code's Python
+extension started hundreds of `rg --files --follow` scans and pegged all
+CPUs). `--clean` empties it.
+
+The template database `reh_template` is a neutralized prod-state copy at the
+prod ref, marked `IS_TEMPLATE`, with a comment that names its ref, core and
+source. `--refresh-base` rebuilds the base image and, with `--from-db` or
+`--from-backup` (an Odoo backup zip; decrypt an `.age` file first), makes a
+new template: copy, product `NEUTRALIZE_SQL` + verify, admin password
+`rehearse-admin`, `odoo neutralize`, prod entrypoint upgrade, neutralize +
+verify again, asset bundles dropped (the template has no filestore). The old
+template stays until the new one is verified.
+
+Limits: the template has no filestore; tests and the smoke run on prod data,
+not demo data; the Postgres container's network has internet access (crons
+are off and the database is neutralized, but this is not the internal-only
+network of `rehearse-upgrade.sh`); the tier rules are a suggestion from file
+paths and a field parser, not a proof.

@@ -31,6 +31,8 @@ Configuration (environment, normally set by the product wrapper):
   REHEARSE_PORT           smoke/--keep port on 127.0.0.1 [8199]
   REHEARSE_ADMIN_PASSWORD admin (id 2) password in the template [rehearse-admin]
   NEUTRALIZE_SQL          product neutralization script [tools/neutralize_db.sql]
+  REHEARSE_CACHE          bulk output, outside any editor workspace
+                          [~/Library/Caches/<repo>-rehearse or ~/.cache/...]
 """
 import argparse
 import ast
@@ -331,10 +333,11 @@ def wanted(path):
 
 
 def stage_worktree(repos, dest):
-    """Sync what `git add -A` would commit (product + submodules, overrides
-    applied) into dest. Only src/, requirements.txt and platform/ (the paths
-    platform/Dockerfile reads)."""
-    files = {}  # rel -> absolute source
+    """Copy what `git add -A` would commit (product + submodules, overrides
+    applied) to dest: src/, requirements.txt and platform/, the paths
+    platform/Dockerfile reads. tar keeps mtimes, so BuildKit sends only what
+    changed since the last run."""
+    groups = []  # (repo dir, prefix, [paths])
 
     def collect(repo, prefix, top):
         tracked = git_z(repo, "ls-files", "-z", "-s")
@@ -342,60 +345,44 @@ def stage_worktree(repos, dest):
                  if line.startswith("160000 ")}
         paths = [line.split("\t", 1)[1] for line in tracked]
         paths += git_z(repo, "ls-files", "-z", "--others", "--exclude-standard")
-        for p in paths:
-            rel = f"{prefix}{p}"
-            if p in links or (top and not wanted(rel)):
-                continue
-            f = Path(repo) / p
-            if f.is_symlink() or f.exists():
-                files[rel] = f
+        keep = [p for p in paths if p not in links
+                and (not top or wanted(p))
+                and ((Path(repo) / p).is_symlink() or (Path(repo) / p).exists())]
+        groups.append((Path(repo), prefix, keep))
         return links
 
-    links = collect(repos.src, "", True)
-    for path in sorted(links):
+    for path in sorted(collect(repos.src, "", True)):
         if not (path == "platform" or wanted(path)):
             continue
         wd = repos.work_dir(path)
         if wd is None:
             die(f"submodule {path} is not checked out "
                 "(git submodule update --init) -- prod would fail the same way")
-        collect(wd, f"{path}/", False)
-    dest.mkdir(parents=True, exist_ok=True)
-    copied = 0
-    for rel, srcf in files.items():
-        d = dest / rel
-        if srcf.is_symlink():
-            target = os.readlink(srcf)
-            if d.is_symlink() and os.readlink(d) == target:
-                continue
-            if d.is_symlink() or d.exists():
-                shutil.rmtree(d) if d.is_dir() and not d.is_symlink() else d.unlink()
-            d.parent.mkdir(parents=True, exist_ok=True)
-            os.symlink(target, d)
-            copied += 1
-            continue
-        st = srcf.stat()
-        if d.is_file() and not d.is_symlink():
-            dt = d.stat()
-            if dt.st_size == st.st_size and dt.st_mtime_ns == st.st_mtime_ns:
-                continue
-        if d.is_symlink():
-            d.unlink()
-        elif d.is_dir():
-            shutil.rmtree(d)
-        d.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(srcf, d)
-        copied += 1
-    removed = 0
-    for root, dirs, fnames in os.walk(dest, topdown=False):
-        for n in fnames + [x for x in dirs if (Path(root) / x).is_symlink()]:
-            rel = os.path.relpath(Path(root) / n, dest)
-            if rel not in files:
-                (Path(root) / n).unlink()
-                removed += 1
-        if root != str(dest) and not os.listdir(root):
-            os.rmdir(root)
-    return len(files), copied, removed
+        collect(wd, path, False)
+    new = dest.with_name(dest.name + ".new")
+    if new.exists():
+        run(["rm", "-rf", str(new)])
+    count = 0
+    for repo, prefix, paths in groups:
+        target = new / prefix
+        target.mkdir(parents=True, exist_ok=True)
+        pack = subprocess.Popen(["tar", "-cf", "-", "--null", "-T", "-", "-C", str(repo)],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, cwd=repo)
+        unpack = subprocess.Popen(["tar", "-xpf", "-", "-C", str(target)], stdin=pack.stdout)
+        pack.stdout.close()
+        pack.stdin.write("\0".join(paths).encode() + b"\0")
+        pack.stdin.close()
+        if pack.wait() or unpack.wait():
+            die(f"staging {repo} failed")
+        count += len(paths)
+    if dest.exists():
+        old = dest.with_name(dest.name + ".old")
+        dest.rename(old)
+        new.rename(dest)
+        run(["rm", "-rf", str(old)])
+    else:
+        new.rename(dest)
+    return count
 
 
 def stage_ref(repos, ref, dest):
@@ -472,10 +459,10 @@ class PG:
         self.password = env.get("POSTGRES_PASSWORD", "")
         self.network = sorted(info["NetworkSettings"]["Networks"])[0]
 
-    def sql(self, sql, db="postgres", capture=True):
+    def sql(self, sql, db="postgres", capture=True, check=True):
         return run(["docker", "exec", "-i", self.container, "psql", "-U", self.user,
                     "-X", "-q", "-At", "-F", "|", "-v", "ON_ERROR_STOP=1", "-d", db],
-                   input=sql, capture=capture)
+                   input=sql, capture=capture, check=check)
 
     def exists(self, db):
         return self.sql(f"SELECT 1 FROM pg_database WHERE datname = '{db}'").strip() == "1"
@@ -606,10 +593,15 @@ def refresh_template(cfg, repos, pg, base, from_db, from_backup):
                                stderr=subprocess.DEVNULL)
         source = Path(from_backup).name
     else:
-        say(f"copy {from_db} -> {new} (pg_dump, the source stays untouched)")
-        pg.sql(f'CREATE DATABASE "{new}" OWNER "{pg.user}"')
-        run(["docker", "exec", pg.container, "sh", "-c",
-             f'pg_dump -U "{pg.user}" "{from_db}" | psql -X -q -U "{pg.user}" -d "{new}" >/dev/null'])
+        say(f"copy {from_db} -> {new} (the source stays untouched)")
+        # A template copy takes seconds but needs the source without
+        # sessions; pg_dump works while someone uses it, in minutes.
+        pg.sql(f'CREATE DATABASE "{new}" TEMPLATE "{from_db}" STRATEGY FILE_COPY', check=False)
+        if not pg.exists(new):
+            say(f"  {from_db} is in use: pg_dump instead")
+            pg.sql(f'CREATE DATABASE "{new}" OWNER "{pg.user}"')
+            run(["docker", "exec", pg.container, "sh", "-c",
+                 f'pg_dump -U "{pg.user}" "{from_db}" | psql -X -q -U "{pg.user}" -d "{new}" >/dev/null'])
         source = from_db
     say("neutralize before any Odoo process touches it")
     neutralize(pg, new, cfg.neutralize_sql)
@@ -638,7 +630,10 @@ def refresh_template(cfg, repos, pg, base, from_db, from_backup):
     neutralize(pg, new, cfg.neutralize_sql)
     # No filestore comes with the template: drop asset bundles so each run
     # regenerates them instead of pointing at missing files.
-    pg.sql("DELETE FROM ir_attachment WHERE url LIKE '/web/assets/%'", db=new)
+    # The same for SCSS customizations (e.g. muk theme colors): their file is
+    # missing, so the bundle would not compile; the module default applies.
+    pg.sql("DELETE FROM ir_attachment WHERE url LIKE '/web/assets/%' OR url LIKE '/_custom/%';"
+           "DELETE FROM ir_asset WHERE path LIKE '/_custom/%'", db=new)
     if pg.exists(tpl):
         pg.sql(f'ALTER DATABASE "{tpl}" IS_TEMPLATE false')
         pg.drop(tpl)
@@ -675,10 +670,10 @@ def clean(cfg, pg, current_base):
         if tag.startswith(f"{PREFIX}-") and img != current_base:
             run(["docker", "rmi", img], capture=True, check=False)
             say(f"removed image {img}")
-    runs = cfg.home / "runs"
-    if runs.exists():
-        shutil.rmtree(runs)
-        say(f"removed {runs}")
+    for name in ("runs", "ctx-run", "ctx-run.new", "ctx-run.old", "ctx-base"):
+        if (cfg.home / name).exists():
+            run(["rm", "-rf", str(cfg.home / name)])
+            say(f"removed {cfg.home / name}")
 
 
 def test_dirs(stage_dir, modules):
@@ -751,7 +746,11 @@ def main():
     cfg.base_ref = a.base
     repos = Repos(a.src, a.base, overrides)
     cfg.neutralize_sql = Path(ENV.get("NEUTRALIZE_SQL", repos.src / "tools" / "neutralize_db.sql"))
-    cfg.home = repos.common.parent / ".local" / "rehearse"
+    # Bulk output (contexts, trees, logs) never goes into the repo tree: an
+    # editor watching the workspace rescans every new file (VS Code's Python
+    # extension pegged all CPUs on 10 Nov 2026).
+    caches = Path.home() / ("Library/Caches" if sys.platform == "darwin" else ".cache")
+    cfg.home = Path(ENV.get("REHEARSE_CACHE") or caches / f"{repos.common.parent.name}-rehearse")
     cfg.home.mkdir(parents=True, exist_ok=True)
 
     if a.clean or a.refresh_base:
@@ -806,8 +805,7 @@ def main():
     try:
         t = time.time()
         ctx = cfg.home / "ctx-run"
-        n, copied, removed = stage_worktree(repos, ctx)
-        say(f"staged {n} files into {ctx} ({copied} copied, {removed} removed)")
+        say(f"staged {stage_worktree(repos, ctx)} files into {ctx} ({time.time() - t:.0f}s)")
         mounts = []
         if tier == "light":
             image = ensure_base(cfg, repos)
@@ -858,7 +856,7 @@ def main():
             + (f"; upgraded: {upgraded[-1][:300]}" if upgraded else ""))
         for l in errors[:10]:
             print("    " + l[:240])
-        ok = rc == 0
+        ok = upgraded_ok = rc == 0
         if not ok:
             subprocess.run(["tail", "-25", str(log)])
 
@@ -873,8 +871,10 @@ def main():
                     tmounts.append(f"{srcdir}:/opt/extra-addons/{rel}:ro")
             log = run_dir / "tests.log"
             say(f"tests {','.join(mods)}, log {log}")
+            # DB_NAME -> dbfilter ^db$: HttpCase requests carry no database
+            # and the Postgres server holds many.
             rc = odoo_run(cfg, pg, image, f"{PREFIX}-{cfg.run_id}-tests", log, mounts=tmounts,
-                          args=["-d", db, "--test-tags", ",".join(f"/{m}" for m in mods),
+                          env=[f"DB_NAME={db}"], args=["-d", db, "--test-tags", ",".join(f"/{m}" for m in mods),
                                 "-u", ",".join(mods), "--stop-after-init"])
             timings["tests"] = time.time() - t
             text, errors, _ = log_summary(log)
@@ -884,7 +884,8 @@ def main():
                 print("    " + l[:240])
             ok = rc == 0 and not errors
 
-        if ok and (a.smoke or a.keep):
+        # Smoke even when tests fail: on prod data some tests fail anyway.
+        if upgraded_ok and (a.smoke or a.keep):
             t = time.time()
             name = f"{PREFIX}-{cfg.run_id}-server"
             created["server"] = odoo_run(cfg, pg, image, name, None, mounts=mounts, detach=True,
@@ -901,7 +902,7 @@ def main():
                                                     "REH_PASSWORD": cfg.admin_pw}).returncode
                 timings["smoke"] = time.time() - t
                 say(f"  smoke exit {rc}")
-                ok = rc == 0
+                ok = ok and rc == 0
                 subprocess.run(["docker", "logs", name], stdout=open(run_dir / "server.log", "w"),
                                stderr=subprocess.STDOUT)
             if a.keep:

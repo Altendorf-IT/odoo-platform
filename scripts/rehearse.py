@@ -619,12 +619,13 @@ def refresh_template(cfg, repos, pg, base, from_db, from_backup):
     if from_backup:
         say(f"restore {from_backup} -> {new}")
         # As platform/backup/restore.sh and Odoo's restore_db(): an empty UTF8
-        # database with C collation, dump.sql in one transaction, stop on error.
+        # database with C collation, dump.sql, stop on error. No single transaction: a full dump
+        # exceeds max_locks_per_transaction; the drop on failure keeps it all-or-nothing.
         pg.sql(f'CREATE DATABASE "{new}" OWNER "{pg.user}" TEMPLATE template0 '
                "ENCODING 'UTF8' LC_COLLATE 'C'")
         dump = subprocess.Popen(["unzip", "-p", from_backup, "dump.sql"], stdout=subprocess.PIPE)
         rc = subprocess.run(["docker", "exec", "-i", pg.container, "psql", "-U", pg.user, "-X",
-                             "-q", "-v", "ON_ERROR_STOP=1", "--single-transaction", "-d", new],
+                             "-q", "-v", "ON_ERROR_STOP=1", "-d", new],
                             stdin=dump.stdout, stdout=subprocess.DEVNULL).returncode
         dump.stdout.close()
         if dump.wait() or rc:
@@ -659,12 +660,24 @@ def refresh_template(cfg, repos, pg, base, from_db, from_backup):
                                            '--db_password "$DB_PASSWORD" --data-dir /var/lib/odoo '
                                            f'-d "{new}" --addons-path=/usr/lib/python3/dist-packages/odoo/addons,'
                                            '/opt/extra-addons/custom_addons,/opt/extra-addons/third_party_addons/_selected'])
+    # The entrypoint installs new modules (required-modules.txt) before it
+    # upgrades the existing ones. A backup older than the base ref has the new
+    # code but the old schema, so that install crashes on missing columns.
+    # Sync the schema first with a plain -u all, then run the normal pass.
+    pre = cfg.home / "template-upgrade-pre.log"
+    rc = rc or odoo_run(cfg, pg, base, f"{PREFIX}-template-upgrade-pre", pre,
+                        entrypoint="bash", args=["-c", 'exec odoo --db_host "$DB_HOST" '
+                                                 '--db_port "$DB_PORT" --db_user "$DB_USER" '
+                                                 '--db_password "$DB_PASSWORD" --data-dir /var/lib/odoo '
+                                                 f'-d "{new}" -u all --stop-after-init '
+                                                 '--addons-path=/usr/lib/python3/dist-packages/odoo/addons,'
+                                                 '/opt/extra-addons/custom_addons,/opt/extra-addons/third_party_addons/_selected'])
     rc = rc or odoo_run(cfg, pg, base, f"{PREFIX}-template-upgrade", log,
                         env=[f"UPGRADE_DB={new}", "UPGRADE_MODULES=auto", "DB_NAME=False"],
                         args=["--stop-after-init"])
     run(["docker", "volume", "rm", cfg.volume], capture=True)
     if rc:
-        die(f"template upgrade failed (exit {rc}), see {log}; {tpl} left as it was")
+        die(f"template upgrade failed (exit {rc}), see {log} and {pre}; {tpl} left as it was")
     say("re-neutralize after the upgrade (new modules may add crons)")
     neutralize(pg, new, cfg.neutralize_sql)
     # No filestore comes with the template: drop asset bundles so each run

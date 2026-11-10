@@ -203,7 +203,7 @@ def field_defs(source):
     return defs, models
 
 
-def classify_file(status, path, old_text, new_text, frontend_roots):
+def classify_file(status, path, old_text, new_text, frontend_roots, in_new_module=False):
     """'full' reason, 'light', or None (not part of the image)."""
     name = path.rsplit("/", 1)[-1]
     if path == "requirements.txt" or name == "requirements.txt":
@@ -215,8 +215,8 @@ def classify_file(status, path, old_text, new_text, frontend_roots):
         return "image build or entrypoint changed"
     if not path.startswith("src/"):
         return None
-    if path.startswith("src/third_party_addons/_selected/"):
-        return "addon selection changed (_selected)"
+    if name == "build-frontend.sh":
+        return "frontend build input"
     if "/migrations/" in path or "/upgrades/" in path:
         return "migration script"
     # Never in the image (Dockerfile.dockerignore strips them), so never a
@@ -231,16 +231,21 @@ def classify_file(status, path, old_text, new_text, frontend_roots):
                     rel.startswith(d + "/") for d in addon_dirs):
                 return "frontend build input"
     if name == "__manifest__.py":
-        if status == "A":
-            return "new module"
+        # A new module is LIGHT unless it brings dependencies: the entrypoint
+        # installs it from required-modules.txt on the mounted tree, as on prod.
         try:
-            old = ast.literal_eval(old_text).get("external_dependencies")
-            new = ast.literal_eval(new_text).get("external_dependencies")
+            old = ast.literal_eval(old_text).get("external_dependencies") if old_text else None
+            new = ast.literal_eval(new_text).get("external_dependencies") if new_text else None
         except (ValueError, SyntaxError):
             return "manifest not parseable"
-        if old != new:
+        if status == "A" and any((new or {}).values()):
+            return "new module with external_dependencies"
+        if status == "M" and old != new:
             return "external_dependencies changed"
-    if name.endswith(".py") and not any(f"/{d}/" in path for d in TEST_DIRS):
+    # A new module's models and fields are created by its install, the same
+    # in both tiers; only changes to installed modules are compared.
+    if name.endswith(".py") and not in_new_module and not any(
+            f"/{d}/" in path for d in TEST_DIRS):
         new = field_defs(new_text) if new_text else ({}, set())
         old = field_defs(old_text) if old_text else ({}, set())
         if new is None or old is None:
@@ -251,6 +256,27 @@ def classify_file(status, path, old_text, new_text, frontend_roots):
         for key, sig in new_f.items():
             if sig[1] and old_f.get(key) != sig:
                 return f"stored field {key[0]}.{key[1]} added or changed"
+    return "light"
+
+
+def selected_reason(repos, status, path):
+    """FULL reason for a _selected entry, or 'light'. The base image has the
+    python deps of every vendored module, selected or not, but builds frontends
+    only of the addons selected at the prod ref."""
+    link = repos.src / path
+    if status == "D" or not link.is_symlink():
+        return "light"
+    target = os.path.normpath(os.path.join(os.path.dirname(path), os.readlink(link)))
+    for sub in repos.sub_names:
+        if target.startswith(sub + "/"):
+            wd = repos.work_dir(sub)
+            target = str(wd / target[len(sub) + 1:]) if wd else target
+            break
+    target = Path(target) if os.path.isabs(target) else repos.src / target
+    if not (target / "__manifest__.py").is_file():
+        return "_selected link does not resolve"
+    if (target / "build-frontend.sh").is_file():
+        return "frontend addon selected"
     return "light"
 
 
@@ -320,8 +346,13 @@ def classify(repos, first_party):
             else:
                 new = read_old(c, now[path], p) if s != "D" else ""
             items.append((s, f"{path}/{p}", old, new))
+    new_modules = tuple(p[:-len("__manifest__.py")] for s, p, _o, _n in items
+                        if s == "A" and p.endswith("/__manifest__.py"))
     for s, p, old, new in items:
-        r = classify_file(s, p, old, new, frontend_roots)
+        if p.startswith("src/third_party_addons/_selected/"):
+            r = selected_reason(repos, s, p)
+        else:
+            r = classify_file(s, p, old, new, frontend_roots, p.startswith(new_modules))
         if r == "light":
             light += 1
         elif r is not None:

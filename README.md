@@ -213,11 +213,16 @@ What one run does:
 1. **Tier.** Diff of the checkout (committed, staged, unstaged, untracked)
    and of each `--sub`/alias working tree against the prod ref
    (`--base`, default `origin/19.0`). FULL for: `odoo-core.env`,
-   requirements, Dockerfile or `docker/`, `_selected`, a new module,
-   `external_dependencies`, migrations, a new model or a stored field added or changed (AST compare),
-   a third-party submodule bump, frontend build inputs (files of a repo with
-   a `build-frontend.sh` addon that are outside its addon directories).
-   Everything else is LIGHT. `--tier` wins.
+   requirements, Dockerfile or `docker/`, `external_dependencies` (changed,
+   or in a new module), migrations, a new model or a stored field added or
+   changed (AST compare), a third-party submodule bump, frontend build
+   inputs (any `build-frontend.sh`; files of a repo with a
+   `build-frontend.sh` addon that are outside its addon directories; a
+   `_selected` link to an addon with a hook). Everything else is LIGHT,
+   also a new module without dependencies, with its models and fields
+   (its install creates them, in both tiers): the entrypoint installs it from
+   `custom_addons/required-modules.txt` of the mounted tree, as on prod
+   (list it there), and `--modules` adds its tests. `--tier` wins.
 2. **Stage.** What `git add -A` would commit (tracked + untracked, not
    ignored), for `src/`, `requirements.txt` and `platform/`, with the
    overrides, is copied (tar, mtimes kept) to `ctx-run` in the cache dir.

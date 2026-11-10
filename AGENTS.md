@@ -32,9 +32,11 @@ is pushed (push = prod release). Use the product's `tools/rehearse.sh`
   computed fields, python logic without a schema or data migration. No image
   build: the code is mounted in the prod addons layout into the standing base
   image. **Never build an image for a light change.**
-- **FULL**: new module, new python or system dependency, Dockerfile or
-  entrypoint change, stored field or data migration, vendor submodule bump,
-  core digest bump, frontend build input (e.g. the Hub Svelte bundle).
+- **FULL**: new python or system dependency (requirements, a new or changed
+  `external_dependencies`), Dockerfile or entrypoint change, stored field or
+  data migration, vendor submodule bump, core digest bump, frontend build
+  input (e.g. the Hub Svelte bundle). A new module without new dependencies
+  is LIGHT: list it in `required-modules.txt`, as for prod.
 - `tools/rehearse.sh --detect` suggests the tier from the diff and prints
   why; an explicit `--tier` wins, but say why in the report when you go
   below the suggestion.

@@ -139,6 +139,13 @@ update; closing it is a veto. No PR spam; new upstream commits just refresh the
 same PR. It is **fail-soft**: a submodule it can't fetch (a private repo the
 token can't reach, or a network blip) is skipped with a warning, not fatal.
 
+The same workflow also watches the core pin. If Docker Hub moved the tag
+named in `odoo-core.yml`, it opens a **separate** PR on branch
+`auto/bump-core` that rewrites the digest in that file. Merging that PR
+deploys the core bump (same as any push to the deploy branch: a restart, and
+the database does not go back). Run a FULL rehearsal of the branch before
+you merge it (`tools/rehearse.sh --tier full`).
+
 To activate it in a product repo:
 
 1. Use a **GitHub App** (a PAT can't span repos of an organization). Create

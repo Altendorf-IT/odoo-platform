@@ -10,6 +10,7 @@ A *product repo* owns only its content:
 product-repo/
 ├── platform/                  <-- THIS repo (submodule)
 ├── docker-compose.yml         <-- symlink -> platform/docker-compose.yml (see DEPLOY.md)
+├── odoo-core.yml              <-- Odoo core image pin, required (DEPLOY.md "Reproducible builds")
 ├── AGENTS.md                  <-- symlink -> platform/AGENTS.md (AI-agent rules)
 ├── docs/                      <-- dated decision records (mandatory, see below)
 ├── Makefile                   <-- 2 lines (config + include, below)
@@ -193,7 +194,7 @@ a neutralized prod-state copy first. The rule is in [AGENTS.md](AGENTS.md);
 this is the how-to. A product calls the tool through a small wrapper
 (`tools/rehearse.sh`) that sets its configuration: the Postgres container,
 the image name, the first-party submodules and their `--name DIR` aliases.
-The prod core digest comes from the product's committed `odoo-core.env`,
+The prod core digest comes from the product's committed `odoo-core.yml`,
 the same line the prod build uses (DEPLOY.md "Reproducible builds";
 `REHEARSE_ODOO_IMAGE` overrides it, but a FULL build still checks the
 file). Rehearse a core bump by changing that line: the change is FULL. All options:
@@ -213,7 +214,7 @@ What one run does:
 
 1. **Tier.** Diff of the checkout (committed, staged, unstaged, untracked)
    and of each `--sub`/alias working tree against the prod ref
-   (`--base`, default `origin/19.0`). FULL for: `odoo-core.env`,
+   (`--base`, default `origin/19.0`). FULL for: `odoo-core.yml`,
    requirements, Dockerfile or `docker/`, `external_dependencies` (changed,
    or in a new module), migrations, a new model or a stored field added or
    changed (AST compare), a third-party submodule bump, frontend build
@@ -225,7 +226,7 @@ What one run does:
    `custom_addons/required-modules.txt` of the mounted tree, as on prod
    (list it there), and `--modules` adds its tests. `--tier` wins.
 2. **Stage.** What `git add -A` would commit (tracked + untracked, not
-   ignored), for `src/`, `requirements.txt`, `odoo-core.env` and
+   ignored), for `src/`, `requirements.txt`, `odoo-core.yml` and
    `platform/`, with the
    overrides, is copied (tar, mtimes kept) to `ctx-run` in the cache dir.
 3. **LIGHT:** `docker build --target addons_tree --output type=local` of that

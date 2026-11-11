@@ -398,39 +398,48 @@ and set `DB_HOST` to the prod Postgres over a shared Dokploy network — **or**
 just let the test app run its own Postgres (~40MB, fully isolated, safer staging).
 
 ### Reproducible builds
-Pin the Odoo core by digest **in git**: a file `odoo-core.env` at the product
-root, one line (comments allowed):
+Pin the Odoo core by digest **in git**: the file `odoo-core.yml` at the
+product root. Every product has it (`scripts/init-product.sh` creates it):
+```yaml
+services:
+  odoo-core:
+    build:
+      args:
+        # 19.0-20261102
+        ODOO_IMAGE: odoo:19.0@sha256:<index digest>
 ```
-ODOO_IMAGE=odoo:19.0@sha256:<index digest>
-```
-The value goes to the image build as the build arg `ODOO_IMAGE`
-(`docker-compose.yml` `build.args`, interpolated from the env files) and to
-`tools/rehearse.sh`. A core bump is then a normal commit: rehearse it
-(FULL, see README "Rehearsal before release"), commit the new line, push.
-Revert the commit to go back. The digest is the multi-arch index digest
-(`docker buildx imagetools inspect odoo:19.0`), so one value fits every host.
+The digest is the multi-arch index digest (`docker buildx imagetools inspect
+odoo:19.0`), so one value fits every host. The comment names the dated Docker
+Hub tag that had this digest when it was pinned. Docker Hub rebuilds dated
+tags too, so only the digest is a pin.
 
 How the value reaches the build:
 
-- Compose interpolates `ODOO_IMAGE` from the env files it is given. With
-  several `--env-file` options the **last file wins**; the shell environment
-  wins over all files. Without `--env-file` compose reads only `.env`.
-- The platform `Makefile` passes `--env-file .env --env-file odoo-core.env`
-  when the product has the file, so the pin wins over a local `.env`.
-- Dokploy runs `docker compose -p <app> --env-file .env -f <Compose Path> up -d
-  --build` with the `.env` it writes from its Environment tab. It does not
-  load `odoo-core.env` by itself. Add it in the app's custom deploy command
-  (`--env-file .env --env-file odoo-core.env`), then delete `ODOO_IMAGE`
-  from the Environment tab. Until then the Environment value is what the
-  build uses.
-- **Guard:** when `odoo-core.env` exists, `platform/Dockerfile` (stage
-  `core_pin`) fails the build if the build arg differs from the pin, for
-  example an old value left in the Dokploy Environment, or a deploy that
-  does not load the file. A failed build does not replace the running
-  container. The pin is written to `/etc/odoo-core-image` in the image.
+- `platform/docker-compose.yml` service `odoo` **extends** service
+  `odoo-core` of `odoo-core.yml` (path relative to the product root). Compose
+  merges its `build.args` into the `odoo` build. The platform service does not
+  set `ODOO_IMAGE` itself, so the committed line is the only source: an
+  `ODOO_IMAGE` in `.env` or in the Dokploy Environment has no effect.
+- Every compose invocation reads it the same way: Dokploy's default deploy
+  command (`docker compose -p <app> --env-file .env -f ./docker-compose.yml
+  up -d --build`), `make up`, a plain `docker compose build`. No custom
+  deploy command and no extra `--env-file`. `extends` with `file:` works in
+  every Compose v2 release (tested on 2.22 and 5.6).
+- A product that does not pin yet writes `ODOO_IMAGE: ${ODOO_IMAGE:-odoo:19.0}`
+  there (what `init-product.sh` creates). Compose interpolates it from `.env`
+  as before. The file must exist: without it compose stops with
+  `open .../odoo-core.yml: no such file or directory`.
+- **Guard:** when the line is a literal value, `platform/Dockerfile` (stage
+  `core_pin`) fails the build if the build arg differs from it (a plain
+  `docker build --build-arg`, a rehearsal with `REHEARSE_ODOO_IMAGE`). The
+  core used is written to `/etc/odoo-core-image` in the image.
+- `tools/rehearse.sh` reads the same line (see README "Rehearsal before
+  release"). A change of the file is a FULL rehearsal.
 
-A product without `odoo-core.env` works as before: `ODOO_IMAGE` from `.env`
-(Dokploy Environment), default `odoo:19.0` (a moving tag; local builds only).
+A core bump is a normal commit to `odoo-core.yml`: rehearse it FULL, commit,
+push. Revert the commit to go back in code. The database does not go back:
+see the warning below. The submodule watcher (`bump-submodules.yml`) opens
+a separate PR `auto/bump-core` when Docker Hub moves the tag in the file.
 
 Vendor module versions are pinned by the `_vendor` submodule commits. Bump them
 deliberately with `make submodules && git add src/third_party_addons/_vendor`.
@@ -503,6 +512,10 @@ retries. An upgrade that fails for the changed modules fails the same way under
 > moves to a newer build of `odoo:19.0`, the hashes of the core addons change
 > and the next boot upgrades them all — minutes, not seconds. Pin `ODOO_IMAGE`
 > by digest (see *Reproducible builds*) so that happens only when you choose.
+> There is no rollback without a database backup: a database upgraded on a
+> newer core need not boot on the older one (Nov 2026: a database upgraded on
+> 19.0-20261102 fails on the older core at `res.company` `tz`). Take a backup
+> before a core bump.
 
 > A module that is **new on disk** shows up in Apps only after a boot that
 > upgraded something, because Odoo refreshes its module list during an upgrade.

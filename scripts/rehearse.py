@@ -22,7 +22,7 @@ module tests and a smoke script, and remove everything they created.
 Configuration (environment, normally set by the product wrapper):
   REHEARSE_PG_CONTAINER   Postgres container to use (required)
   REHEARSE_ODOO_IMAGE     prod core image, odoo:19.0@sha256:...
-                          [ODOO_IMAGE of the product's odoo-core.env]
+                          [ODOO_IMAGE of the product's odoo-core.yml]
   REHEARSE_IMAGE_REPO     local image name [odoo-product]
   REHEARSE_FIRST_PARTY    submodule paths whose content is classified file by
                           file; a bump of any other submodule means FULL
@@ -51,7 +51,7 @@ from pathlib import Path
 ENV = os.environ
 PREFIX = "reh"
 TEST_DIRS = ("tests", "test")  # stripped by Dockerfile.dockerignore
-CORE_PIN = "odoo-core.env"     # the product's committed core pin
+CORE_PIN = "odoo-core.yml"     # the product's committed core pin
 
 
 def say(msg):
@@ -368,7 +368,7 @@ def wanted(path):
 
 def stage_worktree(repos, dest):
     """Copy what `git add -A` would commit (product + submodules, overrides
-    applied) to dest: src/, requirements.txt, odoo-core.env and platform/,
+    applied) to dest: src/, requirements.txt, odoo-core.yml and platform/,
     the paths platform/Dockerfile reads. tar keeps mtimes, so BuildKit sends only what
     changed since the last run."""
     groups = []  # (repo dir, prefix, [paths])
@@ -799,7 +799,7 @@ def main():
     repos = Repos(a.src, a.base, overrides)
     pin = repos.src / CORE_PIN
     if not cfg.core and pin.is_file():
-        cfg.core = (re.findall(r"^ODOO_IMAGE=(.*)$", pin.read_text(), re.M) or [""])[-1].strip()
+        cfg.core = (re.findall(r"^\s*ODOO_IMAGE:\s*([^\s#]+)", pin.read_text(), re.M) or [""])[-1]
     cfg.neutralize_sql = Path(ENV.get("NEUTRALIZE_SQL", repos.src / "tools" / "neutralize_db.sql"))
     # Bulk output (contexts, trees, logs) never goes into the repo tree: an
     # editor watching the workspace rescans every new file (VS Code's Python
@@ -822,7 +822,7 @@ def main():
     if a.detect:
         return
     if "@sha256:" not in cfg.core:
-        die(f"no core pinned by digest: set ODOO_IMAGE=odoo:19.0@sha256:... in {CORE_PIN} "
+        die(f"no core pinned by digest: set ODOO_IMAGE: odoo:19.0@sha256:... in {CORE_PIN} "
             "(or REHEARSE_ODOO_IMAGE)")
     pg = PG(ENV.get("REHEARSE_PG_CONTAINER") or die("REHEARSE_PG_CONTAINER is not set"))
 

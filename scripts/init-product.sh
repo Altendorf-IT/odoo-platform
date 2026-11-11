@@ -63,6 +63,23 @@ echo "    added docs/decisions + AGENTS.md"
 # both resolve correctly. See platform/DEPLOY.md "Root compose is a symlink".
 ln -s platform/docker-compose.yml docker-compose.yml
 
+# The Odoo core the build uses (platform/docker-compose.yml extends this file).
+# Starts unpinned (ODOO_IMAGE from .env); pin it by digest before the first
+# deploy. See platform/DEPLOY.md "Reproducible builds".
+cat > odoo-core.yml <<'YAML'
+# Odoo core image for every build of this product (platform/docker-compose.yml
+# extends service odoo-core). Pin it by multi-arch index digest, with the
+# dated Docker Hub tag as a comment above the line:
+#        # 19.0-YYYYMMDD
+#        ODOO_IMAGE: odoo:19.0@sha256:<index digest>
+# See platform/DEPLOY.md "Reproducible builds".
+services:
+  odoo-core:
+    build:
+      args:
+        ODOO_IMAGE: ${ODOO_IMAGE:-odoo:19.0}
+YAML
+
 cat > Makefile <<YAML
 # Product config only — every target lives in the odoo-platform submodule.
 # \`make help\` for the list; see platform/README.md for the integration contract.

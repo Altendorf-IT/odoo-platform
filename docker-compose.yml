@@ -105,11 +105,17 @@ services:
       retries: 10
 
   odoo:
+    # The Odoo core (build arg ODOO_IMAGE) comes from the product's committed
+    # odoo-core.yml, service odoo-core. Required in every product. A literal
+    # digest there is the pin, and the deploy environment cannot override it.
+    # See DEPLOY.md "Reproducible builds".
+    extends:
+      file: odoo-core.yml
+      service: odoo-core
     build:
       context: .                       # product repo root
       dockerfile: platform/Dockerfile
       args:
-        ODOO_IMAGE: ${ODOO_IMAGE:-odoo:19.0}
         INSTALL_VENDOR_REQS: ${INSTALL_VENDOR_REQS:-1}
         # Apt mirror override for hosts with a bad path to Canonical
         # (e.g. https://mirror.23m.com/ubuntu). Empty = upstream.

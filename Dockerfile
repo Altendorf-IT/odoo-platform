@@ -4,28 +4,29 @@
 # platform as a submodule at ./platform. Build context = PRODUCT repo root
 # (see platform/docker-compose.yml).
 # Base = official Odoo 19 image (clean upstream == our checkout). Pin it by
-# digest in the product's committed `odoo-core.env` (ODOO_IMAGE=...@sha256:...;
-# see DEPLOY.md "Reproducible builds"), or via ODOO_IMAGE in .env.
+# digest in the product's committed `odoo-core.yml` (ODOO_IMAGE: ...@sha256:...;
+# see DEPLOY.md "Reproducible builds"). Compose passes it as the build arg.
 #
 ARG ODOO_IMAGE=odoo:19.0
 
-# Core pin guard. A product that commits `odoo-core.env` builds on exactly that
-# core: a build whose ODOO_IMAGE differs (an old value in the deploy
-# environment, an env file not loaded) fails here instead of shipping another
-# core. Without the file nothing is checked. The pin goes into the image.
+# Core pin guard. Compose takes ODOO_IMAGE from the product's `odoo-core.yml`.
+# A build that gets another value (a plain `docker build --build-arg`, a
+# rehearsal override) fails here instead of shipping another core. A value
+# that is not literal (`${ODOO_IMAGE:-...}`, an unpinned product) is not
+# checked. The core used goes into the image.
 FROM ${ODOO_IMAGE} AS core_pin
 ARG ODOO_IMAGE
 USER root
-COPY odoo-core.en[v] /core/
+COPY odoo-core.ym[l] /core/
 RUN set -eu; \
     pin=; \
-    if [ -f /core/odoo-core.env ]; then \
-        pin=$(sed -n 's/^ODOO_IMAGE=//p' /core/odoo-core.env | tail -n 1); \
+    if [ -f /core/odoo-core.yml ]; then \
+        pin=$(sed -n 's/^[[:space:]]*ODOO_IMAGE:[[:space:]]*\([^[:space:]#]*\).*/\1/p' /core/odoo-core.yml | tail -n 1); \
     fi; \
+    case "$pin" in *'$'*) pin= ;; esac; \
     if [ -n "$pin" ] && [ "$pin" != "$ODOO_IMAGE" ]; then \
-        echo "ERROR: ODOO_IMAGE is '$ODOO_IMAGE', odoo-core.env pins '$pin'." >&2; \
-        echo "       Load odoo-core.env after .env (--env-file .env --env-file odoo-core.env)" >&2; \
-        echo "       or set ODOO_IMAGE to the pin." >&2; \
+        echo "ERROR: ODOO_IMAGE is '$ODOO_IMAGE', odoo-core.yml pins '$pin'." >&2; \
+        echo "       Build through compose (it reads odoo-core.yml) or pass the pin." >&2; \
         exit 1; \
     fi; \
     mkdir -p /core; echo "$ODOO_IMAGE" > /core/image

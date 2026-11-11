@@ -25,6 +25,14 @@
 #
 # Optionally pass `with: { paths: "a b c" }` to watch only specific submodules.
 #
+# Core image: a product with a committed `odoo-core.yml` pinned by digest
+# (`ODOO_IMAGE: odoo:19.0@sha256:...`) is also checked against Docker Hub. When
+# the tag in that line now has another index digest, the line (and the dated
+# tag comment above it) is rewritten on a SEPARATE fixed branch
+# (auto/bump-core) and PR, never mixed into the submodule PR: a core bump
+# upgrades most of the database. Unpinned products and other registries are
+# skipped; a registry error is a warning, never a failure.
+#
 # Auth (preferred): a GitHub App. The workflow mints a short-lived installation
 # token with actions/create-github-app-token, scoped to the whole owner
 # (organization) so it can also read private submodule repos. The App needs
@@ -54,6 +62,11 @@ on:
         required: false
         type: string
         default: auto/bump-submodules
+      core_pr_branch:
+        description: Fixed branch name used for the core image bump PR
+        required: false
+        type: string
+        default: auto/bump-core
       app_id:
         description: >-
           GitHub App ID (or client ID) for the bump App. Not secret; pass a
@@ -234,4 +247,123 @@ jobs:
           else
             gh pr create --base "$BASE" --head "$BRANCH" \
               --title "Bump submodules to latest" --body "$body"
+          fi
+
+      # --- Core image (odoo-core.yml) -------------------------------------
+      # Runs after the submodule steps on a branch of its own from the
+      # checked-out commit; only odoo-core.yml is ever staged here.
+      - name: Check the core pin against Docker Hub
+        id: core
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          BRANCH: ${{ inputs.core_pr_branch }}
+        run: |
+          set -eu
+          if [ ! -f odoo-core.yml ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No odoo-core.yml: core image not watched."
+            exit 0
+          fi
+          git checkout -q -f -B "$BRANCH" "$GITHUB_SHA"
+          python3 - <<'PY'
+          import json, os, re, sys, urllib.request
+
+          out = open(os.environ["GITHUB_OUTPUT"], "a")
+
+          def finish(msg, **kv):
+              print(msg)
+              kv.setdefault("changed", "false")
+              for k, v in kv.items():
+                  out.write(f"{k}={v}\n")
+              sys.exit(0)
+
+          def hub(url):
+              req = urllib.request.Request(url, headers={"User-Agent": "odoo-platform-bump"})
+              with urllib.request.urlopen(req, timeout=30) as res:
+                  return json.load(res)
+
+          path = "odoo-core.yml"
+          lines = open(path).read().splitlines(keepends=True)
+          rows = [i for i, l in enumerate(lines) if re.match(r"\s*ODOO_IMAGE:\s*\S", l)]
+          if not rows:
+              finish("odoo-core.yml has no ODOO_IMAGE line: skipped.")
+          i = rows[-1]
+          indent, ref = re.match(r"(\s*)ODOO_IMAGE:\s*([^\s#]+)", lines[i]).groups()
+          if "@sha256:" not in ref or "$" in ref:
+              finish(f"Core not pinned by digest ({ref}): skipped.")
+          name, old = ref.split("@", 1)
+          repo, tag = (name.rsplit(":", 1) if ":" in name.rsplit("/", 1)[-1] else (name, "latest"))
+          first = repo.split("/")[0]
+          if "/" in repo and ("." in first or ":" in first or first == "localhost"):
+              finish(f"{name} is not on Docker Hub: skipped.")
+          if "/" not in repo:
+              repo = f"library/{repo}"
+          api = f"https://hub.docker.com/v2/repositories/{repo}/tags"
+          try:
+              new = hub(f"{api}/{tag}").get("digest") or ""
+          except Exception as exc:
+              print(f"::warning::Docker Hub lookup of {name} failed: {exc}")
+              finish("Core check skipped.")
+          if not new.startswith("sha256:"):
+              print(f"::warning::Docker Hub returned no digest for {name}")
+              finish("Core check skipped.")
+          if new == old:
+              finish(f"{name} is still {old}: core pin current.")
+          dated = ""
+          try:
+              for t in hub(f"{api}?page_size=100&ordering=last_updated&name={tag}-").get("results", []):
+                  if t.get("digest") == new and t.get("name") != tag:
+                      dated = t["name"]
+                      break
+          except Exception as exc:
+              print(f"::warning::Docker Hub tag list for {name} failed: {exc}")
+          label = dated or f"{tag} (no dated tag found)"
+          comment = f"{indent}# {label}\n"
+          if i and re.match(r"\s*#\s*" + re.escape(tag) + r"(-\d{8})?(\s|$)", lines[i - 1]):
+              lines[i - 1] = comment
+          else:
+              lines.insert(i, comment)
+              i += 1
+          lines[i] = f"{indent}ODOO_IMAGE: {name}@{new}\n"
+          open(path, "w").write("".join(lines))
+          finish(f"{name}: {old} -> {new} ({label})",
+                 changed="true", image=name, old=old, new=new, label=label)
+          PY
+
+      - name: Push core bump branch and open/refresh PR
+        if: ${{ !cancelled() && steps.core.outputs.changed == 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+          BRANCH: ${{ inputs.core_pr_branch }}
+          BASE: ${{ github.ref_name }}
+          IMAGE: ${{ steps.core.outputs.image }}
+          OLD: ${{ steps.core.outputs.old }}
+          NEW: ${{ steps.core.outputs.new }}
+          LABEL: ${{ steps.core.outputs.label }}
+        run: |
+          set -eu
+          git add -- odoo-core.yml
+          git commit -m "chore: bump the Odoo core to $LABEL"
+          git push -f origin "$BRANCH"
+          body="Automated Odoo core bump: \`$IMAGE\` now has another index digest on Docker Hub.
+
+          - old: \`$OLD\`
+          - new: \`$NEW\` (\`$LABEL\`)
+
+          **Read before merging. Merging deploys it.**
+
+          - A core bump upgrades most of the database: the hashes of the core addons change and the first boot upgrades them all. Expect about 1 minute of extra downtime on that deploy.
+          - There is no rollback without a database backup. A database upgraded on the new core need not boot on the old core (Nov 2026: \`res.company\` \`tz\`). Reverting this commit alone does not help. Take a backup first.
+          - Run a FULL-tier rehearsal of this branch before merging (\`tools/rehearse.sh --tier full\`).
+
+          Close to veto. _Refreshed automatically when the tag moves again._"
+          existing=$(gh pr list --head "$BRANCH" --base "$BASE" --state open --json number -q '.[0].number')
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --title "Bump Odoo core to $LABEL" --body "$body"
+            echo "Updated existing PR #$existing"
+          else
+            gh pr create --base "$BASE" --head "$BRANCH" \
+              --title "Bump Odoo core to $LABEL" --body "$body"
           fi

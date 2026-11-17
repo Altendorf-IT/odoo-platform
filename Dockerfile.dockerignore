@@ -36,6 +36,10 @@
 # organize_urself is ours too, only vendored: its catalogs are the product.
 !src/third_party_addons/_vendor/organize_urself/**/i18n
 !src/third_party_addons/_vendor/organize_urself/**/i18n/**
+# The Hustlers Hub add-ons (hustlers_hub*) are ours too, only vendored. Other
+# add-ons of that repo (web_svelte_host) keep the vendor rule.
+!src/third_party_addons/_vendor/hustlers_hub/odoo-addons/hustlers_hub*/i18n
+!src/third_party_addons/_vendor/hustlers_hub/odoo-addons/hustlers_hub*/i18n/**
 
 # === Docs not needed at runtime ===
 **/doc/

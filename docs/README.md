@@ -5,3 +5,4 @@
 - [2026-11-10 — The pip layer is keyed on dependency lists, not on vendor code](decisions/2026-11-10-pydeps-stage.md)
 - [2026-11-10 — Rehearsal in two tiers: LIGHT without an image build, FULL as before](decisions/2026-11-10-light-rehearsal.md)
 - [2026-11-11 — The core pin reaches every build through compose `extends`](decisions/2026-11-11-core-pin-compose-extends.md)
+- [2026-11-17 — The image keeps the translation catalogs of the Hub add-ons](decisions/2026-11-17-keep-hub-i18n.md)

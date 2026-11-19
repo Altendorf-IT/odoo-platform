@@ -213,6 +213,7 @@ tools/rehearse.sh --ou ../ou-feature \
     --modules organize_uraccounting --smoke ./smoke.py   # LIGHT if the diff allows
 tools/rehearse.sh --tier full                  # force a full image build
 tools/rehearse.sh --keep                       # leave a server on 127.0.0.1:8199
+tools/rehearse.sh --no-browser                 # skip the browser smoke (report says so)
 tools/rehearse.sh --clean                      # remove every reh-* leftover
 tools/rehearse.sh --refresh-base --from-db <neutralized db>    # or --from-backup <zip>
 ```
@@ -253,9 +254,19 @@ What one run does:
    `click-odoo-update`), the same path a deploy takes.
 6. **Tests** (`--modules a,b`): the image strips `tests/`, so the run adds
    only these modules' test directories, then `-u a,b --test-tags /a,/b`.
-7. **Smoke** (`--smoke <exe>`): a server on `127.0.0.1:$REHEARSE_PORT`; the
+7. **Browser smoke** (always, unless `--no-browser`): a server on
+   `127.0.0.1:$REHEARSE_PORT`; headless Chrome on the host (the images have
+   none) logs in as user id 2 and opens `/odoo` and that user's partner form
+   `/odoo/res.partner/<id>` (a form with a chatter), plus the pages in
+   `REHEARSE_BROWSER_PATHS` (comma list). An uncaught error, a
+   `console.error` (e.g. an OwlError, "cannot be located in element tree"),
+   an error dialog or no view after 60 s fails the run. Python tests render
+   no page: on 19 Nov 2026 a template xpath crashed every chatter form on
+   prod after a green rehearsal. No Chrome found is an error (set
+   `REHEARSE_CHROME`); `--no-browser` skips it and the report warns.
+8. **Smoke** (`--smoke <exe>`): the same server; the
    executable gets `REH_URL`, `REH_DB`, `REH_LOGIN`, `REH_PASSWORD`.
-8. **Cleanup.** Container, database, volume, run image and tree are removed;
+9. **Cleanup.** Container, database, volume, run image and tree are removed;
    logs stay in `runs/<run>/` of the cache dir until `--clean`. `--keep` leaves
    everything up for manual testing.
 

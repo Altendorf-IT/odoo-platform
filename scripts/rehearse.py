@@ -17,7 +17,8 @@ FULL   The platform Dockerfile builds a complete image from the same staged
 Both tiers then do the same: copy the standing template database (a
 neutralized prod-state copy, Postgres TEMPLATE, seconds), boot the prod
 entrypoint once (UPGRADE_MODULES=auto -> click-odoo-update), optionally run
-module tests and a smoke script, and remove everything they created.
+module tests, open backend pages in headless Chrome (browser smoke), optionally
+run a smoke script, and remove everything they created.
 
 Configuration (environment, normally set by the product wrapper):
   REHEARSE_PG_CONTAINER   Postgres container to use (required)
@@ -31,20 +32,27 @@ Configuration (environment, normally set by the product wrapper):
   REHEARSE_TEMPLATE_DB    [reh_template]
   REHEARSE_PORT           smoke/--keep port on 127.0.0.1 [8199]
   REHEARSE_ADMIN_PASSWORD admin (id 2) password in the template [rehearse-admin]
+  REHEARSE_CHROME         Chrome/Chromium for the browser smoke [found on PATH
+                          or in /Applications]
+  REHEARSE_BROWSER_PATHS  /odoo/...,... more pages for the browser smoke
   NEUTRALIZE_SQL          product neutralization script [tools/neutralize_db.sql]
   REHEARSE_CACHE          bulk output, outside any editor workspace
                           [~/Library/Caches/<repo>-rehearse or ~/.cache/...]
 """
 import argparse
 import ast
+import base64
 import hashlib
 import json
 import os
 import re
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -756,6 +764,174 @@ def wait_http(url, timeout=180):
     return False
 
 
+# --------------------------------------------------------------------------
+# Browser smoke: real backend pages in headless Chrome
+# --------------------------------------------------------------------------
+# Python tests render no page. On 19 Nov 2026 an OWL template xpath lost its
+# anchor and every form with a chatter crashed on prod; the rehearsal passed.
+# Chrome on the host, driven over the DevTools protocol with the stdlib: no
+# node, no npm, no browser download (the base images have no Chrome).
+CHROMES = ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+           "google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
+# Ready when the action manager shows an action; an error dialog ends the wait.
+READY_JS = """(() => {
+  const dlg = document.querySelector('.o_error_dialog, .o_dialog .modal-content .o_error_detail');
+  if (dlg) return {error: (dlg.closest('.modal-content') || dlg).innerText.slice(0, 2000)};
+  return {ready: !!document.querySelector('.o_action_manager > *')};
+})()"""
+
+
+def find_chrome():
+    for c in (ENV.get("REHEARSE_CHROME"), *CHROMES):
+        if c and shutil.which(c):
+            return shutil.which(c)
+    return None
+
+
+class CDP:
+    """Minimal DevTools protocol client: one WebSocket, text frames only."""
+
+    def __init__(self, ws_url):
+        u = urllib.parse.urlparse(ws_url)
+        self.sock = socket.create_connection((u.hostname, u.port), timeout=60)
+        key = base64.b64encode(os.urandom(16)).decode()
+        self.sock.sendall(f"GET {u.path} HTTP/1.1\r\nHost: {u.netloc}\r\nUpgrade: websocket\r\n"
+                          f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
+                          "Sec-WebSocket-Version: 13\r\n\r\n".encode())
+        head = b""
+        while not head.endswith(b"\r\n\r\n"):
+            head += self._read(1)
+        if b" 101 " not in head.split(b"\r\n", 1)[0]:
+            raise ConnectionError(f"DevTools handshake: {head[:200]!r}")
+        self.last_id = 0
+        self.events = []
+
+    def _read(self, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = self.sock.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("DevTools socket closed")
+            buf += chunk
+        return buf
+
+    def _message(self):
+        data = b""
+        while True:
+            b0, b1 = self._read(2)
+            n = b1 & 0x7F
+            if n == 126:
+                n = struct.unpack(">H", self._read(2))[0]
+            elif n == 127:
+                n = struct.unpack(">Q", self._read(8))[0]
+            payload, op = self._read(n), b0 & 0x0F
+            if op == 8:
+                raise ConnectionError("DevTools socket closed")
+            if op in (0, 1):
+                data += payload
+                if b0 & 0x80:
+                    return json.loads(data)
+
+    def call(self, method, **params):
+        self.last_id += 1
+        msg = json.dumps({"id": self.last_id, "method": method, "params": params}).encode()
+        n, mask = len(msg), os.urandom(4)
+        size = (bytes([0x80 | n]) if n < 126 else bytes([0x80 | 126]) + struct.pack(">H", n)
+                if n < 65536 else bytes([0x80 | 127]) + struct.pack(">Q", n))
+        self.sock.sendall(b"\x81" + size + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(msg)))
+        while True:
+            m = self._message()
+            if m.get("id") == self.last_id:
+                if "error" in m:
+                    raise RuntimeError(f"{method}: {m['error']}")
+                return m.get("result", {})
+            self.events.append(m)
+
+
+def page_errors(events):
+    """Uncaught exceptions and console.error lines among DevTools events."""
+    out = []
+    for e in events:
+        p = e.get("params", {})
+        if e.get("method") == "Runtime.exceptionThrown":
+            d = p["exceptionDetails"]
+            out.append("uncaught: " + (d.get("exception", {}).get("description") or d.get("text", "")))
+        elif e.get("method") == "Runtime.consoleAPICalled" and p.get("type") == "error":
+            out.append("console.error: " + " ".join(
+                str(a.get("value", a.get("description", ""))) for a in p.get("args", [])))
+    return out
+
+
+def short(text, keep=300):
+    """One line without stack frames; head and tail of a long message (the
+    tail of an OWL xpath error says 'cannot be located in element tree')."""
+    text = " ".join(l.strip() for l in text.splitlines() if not l.strip().startswith("at "))
+    return text if len(text) <= 2 * keep else f"{text[:keep]} [...] {text[-keep:]}"
+
+
+def page_state(cdp):
+    try:
+        res = cdp.call("Runtime.evaluate", expression=READY_JS, returnByValue=True)
+    except RuntimeError:  # no execution context yet (navigation in progress)
+        return {}
+    return res["result"].get("value") or {}
+
+
+def browser_smoke(chrome, url, db, login, password, paths, work_dir, timeout=60):
+    """Open each path logged in as login; return a list of failures."""
+    req = urllib.request.Request(f"{url}/web/session/authenticate", headers={
+        "Content-Type": "application/json"}, data=json.dumps({"jsonrpc": "2.0", "method": "call",
+        "params": {"db": db, "login": login, "password": password}}).encode())
+    with urllib.request.urlopen(req, timeout=60) as r:
+        body = json.load(r)
+        sid = re.search(r"session_id=([^;]+)", ", ".join(r.headers.get_all("Set-Cookie") or []))
+    if body.get("error") or not sid:
+        return [f"login {login} failed: {str(body.get('error'))[:300]}"]
+    profile = Path(work_dir) / "chrome-profile"
+    shutil.rmtree(profile, ignore_errors=True)
+    profile.mkdir(parents=True)
+    proc = subprocess.Popen([chrome, "--headless", "--remote-debugging-port=0",
+                             f"--user-data-dir={profile}", "--no-first-run",
+                             "--no-default-browser-check", "--window-size=1440,900", "about:blank"],
+                            stdout=subprocess.DEVNULL, stderr=open(Path(work_dir) / "chrome.log", "w"))
+    failures = []
+    try:
+        port_file, end = profile / "DevToolsActivePort", time.time() + 30
+        while not port_file.exists() and time.time() < end:
+            time.sleep(0.2)
+        if not port_file.exists():
+            return [f"Chrome did not open a DevTools port (see {work_dir}/chrome.log)"]
+        port = port_file.read_text().split()[0]
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=10) as r:
+            target = next(t for t in json.load(r) if t["type"] == "page")
+        cdp = CDP(target["webSocketDebuggerUrl"])
+        cdp.call("Runtime.enable")
+        cdp.call("Network.setCookie", name="session_id", value=sid.group(1), url=url)
+        for path in paths:
+            cdp.events.clear()
+            cdp.call("Page.navigate", url=url + path)
+            state, end = {}, time.time() + timeout
+            while time.time() < end and not (state.get("error") or page_errors(cdp.events)):
+                time.sleep(0.5)
+                state = page_state(cdp)
+                if state.get("ready"):
+                    time.sleep(2)  # late errors: lazy components, second render
+                    state = page_state(cdp)
+                    break
+            errs = page_errors(cdp.events) + ([f"error dialog: {state['error']}"]
+                                              if state.get("error") else [])
+            if not errs and not state.get("ready"):
+                errs = [f"no view rendered within {timeout}s"]
+            failures += [f"{path}: {short(e)}" for e in errs]
+            say(f"  browser {path}: {'OK' if not errs else 'FAILED'}")
+        cdp.sock.close()
+    finally:
+        proc.terminate()
+        proc.wait(timeout=30)
+        shutil.rmtree(profile, ignore_errors=True)
+    return failures
+
+
 def main():
     aliases = dict(a.split("=", 1) for a in ENV.get("REHEARSE_ALIASES", "").split(",") if "=" in a)
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
@@ -765,6 +941,8 @@ def main():
     ap.add_argument("--smoke", help="executable run against the server "
                     "(env REH_URL, REH_DB, REH_LOGIN, REH_PASSWORD)")
     ap.add_argument("--keep", action="store_true", help="leave server, DB and tree for manual testing")
+    ap.add_argument("--no-browser", action="store_true",
+                    help="skip the browser smoke (headless Chrome opens /odoo and a chatter form)")
     ap.add_argument("--detect", action="store_true", help="only print the tier suggestion")
     ap.add_argument("--refresh-base", action="store_true",
                     help="rebuild the base image and the template database")
@@ -843,6 +1021,10 @@ def main():
     tier = a.tier or tier
     if not pg.exists(cfg.template):
         die(f"no template database {cfg.template}: run --refresh-base --from-db <neutralized db>")
+    chrome = None if a.no_browser else find_chrome()
+    if not a.no_browser and not chrome:
+        die("no Chrome for the browser smoke: install Google Chrome or set REHEARSE_CHROME "
+            "(--no-browser skips it, the report then says so)")
     note = template_note(pg, cfg.template)
     sha = git(repos.src, "rev-parse", a.base).strip()
     if sha not in note:
@@ -941,7 +1123,7 @@ def main():
             ok = rc == 0 and not errors
 
         # Smoke even when tests fail: on prod data some tests fail anyway.
-        if upgraded_ok and (a.smoke or a.keep):
+        if upgraded_ok and (a.smoke or a.keep or chrome):
             t = time.time()
             name = f"{PREFIX}-{cfg.run_id}-server"
             created["server"] = odoo_run(cfg, pg, image, name, None, mounts=mounts, detach=True,
@@ -950,7 +1132,18 @@ def main():
             if not wait_http(f"{url}/web/health"):
                 subprocess.run(["docker", "logs", "--tail", "30", name])
                 die("server did not come up")
-            login = pg.sql("SELECT login FROM res_users WHERE id = 2", db=db).strip()
+            login, partner = pg.sql("SELECT login, partner_id FROM res_users WHERE id = 2",
+                                    db=db).strip().split("|")
+            if chrome:
+                paths = ["/odoo", f"/odoo/res.partner/{partner}"] + [
+                    p for p in ENV.get("REHEARSE_BROWSER_PATHS", "").split(",") if p]
+                say(f"browser smoke ({chrome}) as {login}: {', '.join(paths)}")
+                failures = browser_smoke(chrome, url, db, login, cfg.admin_pw, paths, run_dir)
+                timings["browser"] = time.time() - t
+                for f in failures:
+                    print("    " + f)
+                ok = ok and not failures
+                t = time.time()
             if a.smoke:
                 say(f"smoke {a.smoke} against {url}")
                 rc = subprocess.run([a.smoke], env={**ENV, "REH_URL": url, "REH_DB": db,
@@ -959,6 +1152,7 @@ def main():
                 timings["smoke"] = time.time() - t
                 say(f"  smoke exit {rc}")
                 ok = ok and rc == 0
+            if a.smoke or chrome:
                 subprocess.run(["docker", "logs", name], stdout=open(run_dir / "server.log", "w"),
                                stderr=subprocess.STDOUT)
             if a.keep:
@@ -979,6 +1173,8 @@ def main():
             say(f"left behind on purpose (--keep): DB {db}, volume {cfg.volume}, {run_dir}; "
                 "remove with --clean")
     total = time.time() - t0
+    if a.no_browser:
+        say("WARNING: browser smoke SKIPPED (--no-browser): no page was rendered in a browser")
     say(f"{tier.upper()} {'OK' if ok else 'FAILED'} in {total:.0f}s ("
         + ", ".join(f"{k} {v:.0f}s" for k, v in timings.items()) + f"); logs {run_dir}")
     sys.exit(0 if ok else 1)
